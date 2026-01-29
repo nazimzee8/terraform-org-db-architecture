@@ -1,0 +1,55 @@
+{
+  "bindings": [
+    {
+      "members": ["user:nazimz.test@gmail.com"],
+      "role": "roles/owner"
+    },
+    {
+      "members": ["user:nazimz.test@gmail.com"],
+      "role": "roles/iam.serviceAccountAdmin"
+    },
+    {
+      "members": ["serviceAccount:sa-scraper-runjob@nazimz-database.iam.gserviceaccount.com"],
+      "role": "roles/storage.objectCreator"
+    },
+    {
+      "members": [
+        "serviceAccount:sa-scraper-runjob@nazimz-database.iam.gserviceaccount.com",
+        "serviceAccount:sa-db-loader@nazimz-database.iam.gserviceaccount.com"
+      ],
+      "role": "roles/vpcaccess.user"
+    },
+    {
+      "members": ["serviceAccount:sa-db-loader@nazimz-database.iam.gserviceaccount.com"],
+      "role": "roles/bigquery.dataViewer"
+    },
+    {
+      "members": ["serviceAccount:sa-db-loader@nazimz-database.iam.gserviceaccount.com"],
+      "role": "roles/bigquery.jobUser"
+    },
+    {
+      "members": [
+        "serviceAccount:sa-db-loader@nazimz-database.iam.gserviceaccount.com",
+        "serviceAccount:sa-manager-infra@nazimz-database.iam.gserviceaccount.com"
+      ],
+      "role": "roles/cloudsql.client"
+    },
+    {
+      "members": ["serviceAccount:sa-scheduler@nazimz-database.iam.gserviceaccount.com"],
+      "role": "roles/run.invoker"
+    },
+    {
+      "members": ["serviceAccount:sa-manager-infra@nazimz-database.iam.gserviceaccount.com"],
+      "role": "roles/compute.networkAdmin"
+    },
+    {
+      "members": ["serviceAccount:sa-manager-infra@nazimz-database.iam.gserviceaccount.com"],
+      "role": "roles/run.admin"
+    },
+    {
+      "members": ["serviceAccount:sa-manager-infra@nazimz-database.iam.gserviceaccount.com"],
+      "role": "roles/config.admin"
+    }
+  ]
+}
+
