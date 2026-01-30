@@ -1,6 +1,12 @@
 project_id            = "nazimz-database"
 region                = "us-west2"
-storage_bucket_name = "nazimz-db-bucket"
+job_source            = "usajobs" || "adzuna" || "multi"
+storage_bucket_name   = "nazimz-db-bucket"
 bq_dataset_id         = "nazimz-bigquery-job"
+bq_table_id           = "job_keyword_signals"
 scraper_job_name      = "hourly-scraper-job"
+scraper_image         = ""
+loader_job_name       = "hourly-loader-job" 
+loader_image          = ""
+adzuna_country        = "us"
 enable_cloudsql       = true
