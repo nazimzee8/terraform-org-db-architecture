@@ -11,16 +11,138 @@ terraform {
 }
 
 variable "project_id" {type = string}
-
 variable "region" {type = string}
+
+variable "job_source" {type = string}
+
+variable "keywords" {type = string}
+variable "keywords_list" {
+  type = string
+  default = [
+    # Cloud / DevOps / Platform
+    "kubernetes",
+    "k8s",
+    "docker",
+    "container",
+    "helm",
+    "terraform",
+    "infrastructure as code",
+    "iac",
+    "ansible",
+    "ci/cd",
+    "pipeline",
+    "github actions",
+    "jenkins",
+    "gitlab ci",
+    "gitops",
+    "argo cd",
+    "flux",
+    "sre",
+    "reliability",
+    "incident",
+    "on-call",
+    "runbook",
+    "observability",
+    "monitoring",
+    "logging",
+    "prometheus",
+    "grafana",
+    "elk",
+    "opentelemetry",
+    "vpc",
+    "networking",
+    "load balancer",
+    "reverse proxy",
+    "nat",
+    "firewall",
+
+    # Backend / APIs / Distributed Systems
+    "backend",
+    "api",
+    "rest",
+    "graphql",
+    "microservices",
+    "distributed systems",
+    "event-driven",
+    "message queue",
+    "kafka",
+    "pubsub",
+    "rabbitmq",
+    "authentication",
+    "authorization",
+    "oauth",
+    "oidc",
+    "jwt",
+    "caching",
+    "redis",
+
+    # Languages / Frameworks / Testing
+    "python",
+    "java",
+    "javascript",
+    "typescript",
+    "sql",
+    "spring boot",
+    "django",
+    "flask",
+    "node.js",
+    "react",
+    "unit testing",
+    "junit",
+    "pytest",
+
+    # Data / ML / MLOps
+    "bigquery",
+    "data pipeline",
+    "etl",
+    "elt",
+    "airflow",
+    "dag",
+    "dbt",
+    "spark",
+    "databricks",
+    "machine learning",
+    "ml",
+    "tensorflow",
+    "pytorch",
+    "feature engineering",
+    "model deployment",
+    "mlops",
+
+    # Security / Compliance (especially useful for USAJOBS)
+    "iam",
+    "least privilege",
+    "secrets manager",
+    "key management",
+    "kms",
+    "devsecops",
+    "security scanning",
+    "vuln",
+    "sbom",
+    "nist",
+    "fedramp",
+    "fisma",
+    "zero trust"
+  ]
+}
 
 variable "storage_bucket_name" {type = string}
 
-variable "bq_dataset_id" {type = string}
+variable "bq_dataset_id"  {type = string}
+variable "bq_table_id"    {type = string}
+
+variable "adzuna_app_id"  {type = string}
+variable "adzuna_key"     {type = string}
+variable "adzuna_country" {type = string}  
+
+variable usajobs_user_email {type = string}
+variable "usajobs_key" {type = string}
 
 variable "scraper_job_name" {type = string}
+variable "scraper_image" {type = string}
 
 variable "loader_job_name" {type = string}
+variable "loader_image" {type = string}
 
 variable "enable_cloudsql" {
   type    = bool
@@ -40,9 +162,19 @@ locals {
 }
 
 locals {
+  non_secret_env = {
+    JOB_SOURCE = var.job_source
+    BQ_PROJECT_ID = var.project_id
+    BQ_DATASET_ID = var.bq_dataset_id
+    BQ_TABLE_ID   = var.bq_table_id
+    ADZUNA_COUNTRY   = var.adzuna_country
+  }
+}
+
+locals {
   project_roles_by_member = {
     (local.sa_scraper) = [
-      "roles/vpcaccess.user",
+      "roles/vpcaccess.user"
     ]
 
     (local.sa_loader) = concat(
@@ -88,6 +220,35 @@ resource "google_storage_bucket_iam_member" "scraper_bucket_writer" {
   role   = "roles/storage.objectCreator"
   member = local.sa_scraper
 }
+
+# Enable access to usajobs user email
+resource "google_secret_manager_secret_iam_member" "scraper_email_accessor" {
+  secret_id = google_secret_manager_secret.usajobs_user_email
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
+}
+
+# Enable access to usajobs api key
+resource "google_secret_manager_secret_iam_member" "scraper_email_accessor" {
+  secret_id = google_secret_manager_secret.usajobs_api_key
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
+}
+
+# Enable access to adzuna app id
+resource "google_secret_manager_secret_iam_member" "scraper_email_accessor" {
+  secret_id = google_secret_manager_secret.adzuna_app_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
+}
+
+# Enable access to adzuna app id
+resource "google_secret_manager_secret_iam_member" "scraper_email_accessor" {
+  secret_id = google_secret_manager_secret.adzuna_api_key
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
+}
+
 
 # Role for loader to read data from our big query dataset.
 resource "google_bigquery_dataset_iam_member" "loader_dataset_viewer" {
@@ -222,7 +383,58 @@ resource "google_cloud_run_v2_job" "scraper_job" {
         egress = "ALL_TRAFFIC"
       }
       containers {
-        image = 
+        image = var.scraper_image
+        
+        dynamic "env" {
+          for_each = local.non_secret_env
+          content {
+            name = env.key
+            value = env.value
+          }
+        }
+
+        # Secret credentials 
+        env {
+          name = "USAJOBS_API_KEY"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.usajobs_api_key.secret_id
+              version = "latest"
+            }
+          }
+        }
+        env {
+          name = "ADZUNA_APP_ID"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.adzuna_app_id.secret_id
+              version = "latest"
+            }
+          }
+        }
+        env {
+          name = "ADZUNA_APP_KEY"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.adzuna_app_key.secret_id
+              version = "latest"
+            }
+          }
+        }
+        env {
+          name = "USAJOBS_USER_AGENT_EMAIL"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.usajobs_user_agent_email.secret_id
+              version = "latest"
+            }
+          }
+        }
+
+        env {
+          name = "INGESTION_BUCKET"
+          value = google_storage_bucket.ingestion_bucket.name
+        }
         volume_mounts {
           name = "gcs-volume"
           mount_path = "/gcs"
@@ -264,13 +476,40 @@ resource "google_cloud_run_v2_job" "loader_job" {
         egress = "PRIVATE_RANGES_ONLY"
       }
       containers {
-        image = 
-
-        env { name = "BQ_DATASET_ID" value = var.bq_dataset_id }
-        env { name = "BQ_TABLE_ID" value = "job_keyword_signals" }
-        env { name = "DB_HOST" value = google_sql_database_instance.private_db.private_ip_address }
-        env { name = "DB_NAME" value = "jobs_db" }
-        env { name = "DB_USER" value = "loader_user" }
+        image = ""
+        env {
+          name = "BQ_PROJECT_ID" 
+          value = var.project_id
+        }
+        env { 
+          name = "BQ_DATASET_ID" 
+          value = var.bq_dataset_id 
+        }
+        env { 
+          name = "BQ_TABLE_ID" 
+          value = var.bq_table_id 
+        }
+        env { 
+          name = "DB_HOST" 
+          value = google_sql_database_instance.private_db.private_ip_address 
+        }
+        env { 
+          name = "DB_NAME" 
+          value = "jobs_db" 
+        }
+        env { 
+          name = "DB_USER" 
+          value = "loader_user" 
+        }
+        env {
+          name = "DB_PASSWORD"
+          value_source {
+            secret_key_ref {
+              secret  = "db-password"
+              version = "1"
+            }
+          }
+        }
       }
     }
   }
@@ -298,6 +537,44 @@ resource "google_bigquery_dataset" "bq_dataset" {
     iam_member = "serviceAccount:sa-manager-infra@nazimz-database.iam.gserviceaccount.com"
   }
 }
+
+# Configure secret for user credentials for USAjobs
+resource "google_secret_manager_secret" "usajobs_user_email" {
+  project   = var.project_id
+  secret_id = "usajobs_user_email"
+  replication { 
+    auto {} 
+  }
+}
+
+# Configure secret for API Key received from USAJobs
+resource "google_secret_manager_secret" "usajobs_api_key" {
+  project   = var.project_id
+  secret_id = "usajobs_api_key"
+  replication { 
+    auto {} 
+  }
+}
+
+# Configure secret for App ID received from Adzuna
+resource "google_secret_manager_secret" "adzuna_app_id" {
+  project   = var.project_id
+  secret_id = "adzuna_app_id"
+  replication { 
+    auto {} 
+  }
+}
+
+# Configure secret for API Key received from Adzuna
+resource "google_secret_manager_secret" "adzuna_app_id" {
+  project   = var.project_id
+  secret_id = "adzuna_api_key"
+  replication { 
+    auto {} 
+  }
+}
+
+
 
 
 
