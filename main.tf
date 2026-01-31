@@ -1,6 +1,3 @@
-# main.tf file
-
-# Define the required provider and version constraint
 terraform {
   required_providers {
     google = {
@@ -13,11 +10,9 @@ terraform {
 variable "project_id" {type = string}
 variable "region" {type = string}
 
-variable "job_source" {type = string}
-
 variable "keywords" {type = string}
 variable "keywords_list" {
-  type = string
+  type = list(string)
   default = [
     # Cloud / DevOps / Platform
     "kubernetes",
@@ -163,7 +158,6 @@ locals {
 
 locals {
   non_secret_env = {
-    JOB_SOURCE = var.job_source
     BQ_PROJECT_ID = var.project_id
     BQ_DATASET_ID = var.bq_dataset_id
     BQ_TABLE_ID   = var.bq_table_id
@@ -229,22 +223,22 @@ resource "google_secret_manager_secret_iam_member" "scraper_email_accessor" {
 }
 
 # Enable access to usajobs api key
-resource "google_secret_manager_secret_iam_member" "scraper_email_accessor" {
+resource "google_secret_manager_secret_iam_member" "scraper_usajobs_api_accessor" {
   secret_id = google_secret_manager_secret.usajobs_api_key
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
 }
 
 # Enable access to adzuna app id
-resource "google_secret_manager_secret_iam_member" "scraper_email_accessor" {
+resource "google_secret_manager_secret_iam_member" "scraper_adzunna_id_accessor" {
   secret_id = google_secret_manager_secret.adzuna_app_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
 }
 
 # Enable access to adzuna app id
-resource "google_secret_manager_secret_iam_member" "scraper_email_accessor" {
-  secret_id = google_secret_manager_secret.adzuna_api_key
+resource "google_secret_manager_secret_iam_member" "scraper_adzuna_api_accessor" {
+  secret_id = google_secret_manager_secret.adzuna_key
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
 }
@@ -378,6 +372,7 @@ resource "google_cloud_run_v2_job" "scraper_job" {
   template {
     task_count = 1
     template {
+      service_account = "sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
       vpc_access {
         connector = google_vpc_access_connector.connector.id
         egress = "ALL_TRAFFIC"
@@ -422,10 +417,10 @@ resource "google_cloud_run_v2_job" "scraper_job" {
           }
         }
         env {
-          name = "USAJOBS_USER_AGENT_EMAIL"
+          name = "USAJOBS_USER_EMAIL"
           value_source {
             secret_key_ref {
-              secret  = google_secret_manager_secret.usajobs_user_agent_email.secret_id
+              secret  = google_secret_manager_secret.usajobs_user_email.secret_id
               version = "latest"
             }
           }
@@ -470,7 +465,7 @@ resource "google_cloud_run_v2_job" "loader_job" {
   template {
     task_count = 1
     template {
-      service_account = "serviceAccount:sa-db-loader@nazimz-database.iam.gserviceaccount.com"
+      service_account = "serviceAccount:sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
       vpc_access {
         connector = google_vpc_access_connector.connector.id
         egress = "PRIVATE_RANGES_ONLY"
@@ -566,13 +561,18 @@ resource "google_secret_manager_secret" "adzuna_app_id" {
 }
 
 # Configure secret for API Key received from Adzuna
-resource "google_secret_manager_secret" "adzuna_app_id" {
+resource "google_secret_manager_secret" "adzuna_api_key" {
   project   = var.project_id
   secret_id = "adzuna_api_key"
   replication { 
     auto {} 
   }
 }
+
+
+
+
+
 
 
 
