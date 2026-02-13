@@ -138,6 +138,7 @@ variable "scraper_image" {type = string}
 
 variable "loader_job_name" {type = string}
 variable "loader_image" {type = string}
+variable "db_master_pwd" {type = string}
 
 variable "enable_cloudsql" {
   type    = bool
@@ -182,7 +183,8 @@ locals {
     (local.sa_manager) = [
       "roles/compute.networkAdmin",
       "roles/run.admin",
-      "roles/config.admin"
+      "roles/config.admin",
+      "roles/cloudkms.cryptoKeyEncrypter"
     ]
   }
 
@@ -208,6 +210,84 @@ resource "google_project_iam_member" "project_bindings" {
   member  = each.value.member
 }
 
+# Configure KMS keyring.
+resource "google_kms_key_ring" "secrets" {
+  name     = "nazimz-keyring"
+  location = var.region
+}
+
+# Configure the key for securing credentials.
+resource "google_kms_crypto_key" "secrets" {
+  name            = "nazimz-key"
+  key_ring        = google_kms_key_ring.secrets.id
+  rotation_period = "7776000s" 
+}
+
+# Configure secret for user credentials for USAjobs
+resource "google_secret_manager_secret" "usajobs_user_email" {
+  project   = var.project_id
+  secret_id = "usajobs_user_email"
+  replication { 
+    auto {
+      customer_managed_encryption {
+        kms_key_name = google_kms_crypto_key.secrets.id
+      }
+    } 
+  }
+}
+
+# Configure secret for API Key received from USAJobs
+resource "google_secret_manager_secret" "usajobs_api_key" {
+  project   = var.project_id
+  secret_id = "usajobs_api_key"
+  replication { 
+    auto {
+      customer_managed_encryption {
+        kms_key_name = google_kms_crypto_key.secrets.id
+      }
+    } 
+  }
+}
+
+# Configure secret for App ID received from Adzuna
+resource "google_secret_manager_secret" "adzuna_app_id" {
+  project   = var.project_id
+  secret_id = "adzuna_app_id"
+  replication { 
+    auto {
+      customer_managed_encryption {
+        kms_key_name = google_kms_crypto_key.secrets.id
+      }
+    } 
+  }
+}
+
+# Configure secret for API Key received from Adzuna
+resource "google_secret_manager_secret" "adzuna_api_key" {
+  project   = var.project_id
+  secret_id = "adzuna_api_key"
+  replication { 
+    auto {
+      customer_managed_encryption {
+        kms_key_name = google_kms_crypto_key.secrets.id
+      }
+    } 
+  }
+}
+
+# Configure secret for bigquery password.
+resource "google_secret_manager_secret" "db_master_pwd" {
+  project   = var.project_id
+  secret_id = "db_master_pwd"
+  replication { 
+    auto {
+      customer_managed_encryption {
+        kms_key_name = google_kms_crypto_key.secrets.id
+      }
+    } 
+  }
+}
+
 # Role for scraper to write data to our cloud storage bucket.
 resource "google_storage_bucket_iam_member" "scraper_bucket_writer" {
   bucket = var.storage_bucket_name
@@ -215,34 +295,40 @@ resource "google_storage_bucket_iam_member" "scraper_bucket_writer" {
   member = local.sa_scraper
 }
 
+# Grant scraper service account encrypt/decrypt permissions on the crypto key
+resource "google_kms_crypto_key_iam_member" "scraper_key_encrypter_decrypter" {
+  crypto_key_id = google_kms_crypto_key.secrets.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = local.sa_scraper
+}
+
 # Enable access to usajobs user email
-resource "google_secret_manager_secret_iam_member" "scraper_email_accessor" {
-  secret_id = google_secret_manager_secret.usajobs_user_email
+resource "google_secret_manager_secret_iam_member" "scraper_usajobs_email_accessor" {
+  secret_id = google_secret_manager_secret.usajobs_user_email.secret_id
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
+  member    = local.sa_scraper
 }
 
 # Enable access to usajobs api key
-resource "google_secret_manager_secret_iam_member" "scraper_usajobs_api_accessor" {
-  secret_id = google_secret_manager_secret.usajobs_api_key
+resource "google_secret_manager_secret_iam_member" "scraper_usajobs_key_accessor" {
+  secret_id = google_secret_manager_secret.usajobs_api_key.secret_id
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
+  member    = local.sa_scraper
 }
 
 # Enable access to adzuna app id
-resource "google_secret_manager_secret_iam_member" "scraper_adzunna_id_accessor" {
-  secret_id = google_secret_manager_secret.adzuna_app_id
+resource "google_secret_manager_secret_iam_member" "scraper_adzuna_app_accessor" {
+  secret_id = google_secret_manager_secret.adzuna_app_id.secret_id
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
+  member    = local.sa_scraper
 }
 
-# Enable access to adzuna app id
+# Enable access to adzuna api key
 resource "google_secret_manager_secret_iam_member" "scraper_adzuna_api_accessor" {
-  secret_id = google_secret_manager_secret.adzuna_key
+  secret_id = google_secret_manager_secret.adzuna_api_key.secret_id
   role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
+  member    = local.sa_scraper
 }
-
 
 # Role for loader to read data from our big query dataset.
 resource "google_bigquery_dataset_iam_member" "loader_dataset_viewer" {
@@ -250,6 +336,13 @@ resource "google_bigquery_dataset_iam_member" "loader_dataset_viewer" {
   dataset_id = var.bq_dataset_id
   role       = "roles/bigquery.dataViewer"
   member     = local.sa_loader
+}
+
+# Enable access to bigquery password.
+resource "google_secret_manager_secret_iam_member" "bigquery_accessor" {
+  secret_id = google_secret_manager_secret.db_master_pwd.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = local.sa_loader
 }
 
 # Role for scheduler can invoke only our scraper job.
@@ -277,7 +370,7 @@ resource "google_compute_subnetwork" "private_subnet" {
   private_ip_google_access = true
 }
 
-# Create the connector subnet within our VPC." 
+# Create the connector subnet within our VPC.
 resource "google_compute_subnetwork" "connector_subnet" {
   name = "connector-subnet"
   region = var.region
@@ -285,11 +378,37 @@ resource "google_compute_subnetwork" "connector_subnet" {
   ip_cidr_range = "10.0.1.0/28"
 }
 
+# Create the VPC connector to connect our Cloud Run jobs to our VPC.
 resource "google_vpc_access_connector" "connector" {
   name = "nazimz-connector"
   region = var.region
   network = google_compute_network.vpc_network.self_link
   ip_cidr_range = google_compute_subnetwork.connector_subnet.ip_cidr_range
+}
+
+# Create the Cloud Router for our Cloud NAT
+resource "google_compute_router" "router" {
+  name    = "router-nat"
+  region  = var.region
+  network = google_compute_network.vpc_network.self_link
+}
+
+# Configure the Cloud NAT gateway
+resource "google_compute_router_nat" "nat_gateway" {
+  name   = "nat-config"
+  router = google_compute_router.router.name
+  region = google_compute_router.router.region
+
+  # Automatically allocate external IP addresses
+  nat_ip_allocate_option = "AUTO_ONLY"
+
+  # CRITICAL FIX: Apply NAT to all subnets in the VPC
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+  
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
 }
 
 # Enable connection from our VPC network to Google's service network that has Cloud SQL.
@@ -314,7 +433,7 @@ resource "google_service_networking_connection" "private_vpc_connection" {
 }
 
 # Configure the private cloud sql database within the private subnet.
-resource "google_sql_database_instance" "private-db-instance" {
+resource "google_sql_database_instance" "private_db_instance" {
   name = "nazimz-private-sql-instance"
   database_version = "MYSQL_8_0"
   region = var.region
@@ -344,25 +463,14 @@ resource "google_compute_firewall" "enable_traffic_to_db" {
   }
 }
 
-# Configure fire wall to reject all egress traffic from private database.
-resource "google_compute_firewall" "deny_all_egress_db" {
-  name = "deny-all-egress-db"
-  network = google_compute_network.vpc_network.id
-  direction = "EGRESS"
-  priority = 1000
-
-  destination_ranges = ["0.0.0.0/0"]
-
-  deny {
-    protocol = "all"
-    ports = ["0-65535"]
-  }
-}
+# CRITICAL: Removed the deny-all-egress firewall rule as it prevents Cloud SQL from functioning
+# Cloud SQL requires egress connectivity for replication, backups, and Google API access
+# Instead, rely on VPC design and Cloud SQL being private-only (no public IP)
 
 # Configure the private database to host our cloud sql instance.
 resource "google_sql_database" "database" {
-  name = "nazimz-private-sql-db"
-  instance = google_sql_database_instance.private-db-instance
+  name     = "nazimz-private-sql-db"
+  instance = google_sql_database_instance.private_db_instance.name
 }
 
 # Configure the Cloud Run job to scrape data from the Internet.
@@ -411,7 +519,7 @@ resource "google_cloud_run_v2_job" "scraper_job" {
           name = "ADZUNA_APP_KEY"
           value_source {
             secret_key_ref {
-              secret  = google_secret_manager_secret.adzuna_app_key.secret_id
+              secret  = google_secret_manager_secret.adzuna_api_key.secret_id
               version = "latest"
             }
           }
@@ -444,7 +552,7 @@ resource "google_cloud_run_v2_job" "scraper_job" {
       }
     }
   }
-  depends_on = google_storage_bucket_iam_member.scraper_bucket_writer
+  depends_on = [google_storage_bucket_iam_member.scraper_bucket_writer]
 }
 
 # Configure the cloud storage bucket for our scraper job to send the data to.
@@ -465,13 +573,13 @@ resource "google_cloud_run_v2_job" "loader_job" {
   template {
     task_count = 1
     template {
-      service_account = "serviceAccount:sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
+      service_account = "sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
       vpc_access {
         connector = google_vpc_access_connector.connector.id
         egress = "PRIVATE_RANGES_ONLY"
       }
       containers {
-        image = ""
+        image = var.loader_image
         env {
           name = "BQ_PROJECT_ID" 
           value = var.project_id
@@ -486,7 +594,7 @@ resource "google_cloud_run_v2_job" "loader_job" {
         }
         env { 
           name = "DB_HOST" 
-          value = google_sql_database_instance.private_db.private_ip_address 
+          value = google_sql_database_instance.private_db_instance.private_ip_address 
         }
         env { 
           name = "DB_NAME" 
@@ -500,8 +608,8 @@ resource "google_cloud_run_v2_job" "loader_job" {
           name = "DB_PASSWORD"
           value_source {
             secret_key_ref {
-              secret  = "db-password"
-              version = "1"
+              secret  = google_secret_manager_secret.db_master_pwd.secret_id
+              version = "latest"
             }
           }
         }
@@ -521,60 +629,14 @@ resource "google_bigquery_dataset" "bq_dataset" {
   }
   access {
     role = "READER"
-    iam_member =  "serviceAccount:sa-db-loader@nazimz-database.iam.gserviceaccount.com"
+    user_by_email = "sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
   }
   access {
     role = "WRITER"
-    iam_member =  "serviceAccount:sa-db-loader@nazimz-database.iam.gserviceaccount.com"
+    user_by_email = "sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
   }
   access {
     role = "OWNER"
-    iam_member = "serviceAccount:sa-manager-infra@nazimz-database.iam.gserviceaccount.com"
+    user_by_email = "sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
   }
 }
-
-# Configure secret for user credentials for USAjobs
-resource "google_secret_manager_secret" "usajobs_user_email" {
-  project   = var.project_id
-  secret_id = "usajobs_user_email"
-  replication { 
-    auto {} 
-  }
-}
-
-# Configure secret for API Key received from USAJobs
-resource "google_secret_manager_secret" "usajobs_api_key" {
-  project   = var.project_id
-  secret_id = "usajobs_api_key"
-  replication { 
-    auto {} 
-  }
-}
-
-# Configure secret for App ID received from Adzuna
-resource "google_secret_manager_secret" "adzuna_app_id" {
-  project   = var.project_id
-  secret_id = "adzuna_app_id"
-  replication { 
-    auto {} 
-  }
-}
-
-# Configure secret for API Key received from Adzuna
-resource "google_secret_manager_secret" "adzuna_api_key" {
-  project   = var.project_id
-  secret_id = "adzuna_api_key"
-  replication { 
-    auto {} 
-  }
-}
-
-
-
-
-
-
-
-
-
-
