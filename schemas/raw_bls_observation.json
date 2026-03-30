@@ -1,0 +1,11 @@
+[
+  { "name": "raw_bls_id",          "type": "STRING",    "mode": "REQUIRED" },
+  { "name": "source_id",           "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "source_series_key",   "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "observation_year",    "type": "INT64",     "mode": "NULLABLE" },
+  { "name": "observation_period",  "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "observation_value",   "type": "NUMERIC",   "mode": "NULLABLE" },
+  { "name": "footnotes_json",      "type": "JSON",      "mode": "NULLABLE" },
+  { "name": "ingested_at",         "type": "TIMESTAMP", "mode": "NULLABLE" },
+  { "name": "raw_payload",         "type": "JSON",      "mode": "NULLABLE" }
+]

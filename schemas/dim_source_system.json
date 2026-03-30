@@ -1,0 +1,4 @@
+[
+  { "name": "source_id",    "type": "STRING", "mode": "REQUIRED" },
+  { "name": "source_name",  "type": "STRING", "mode": "REQUIRED" }
+]

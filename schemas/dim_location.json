@@ -1,0 +1,10 @@
+[
+  { "name": "location_id",   "type": "STRING",  "mode": "REQUIRED" },
+  { "name": "country_code",  "type": "STRING",  "mode": "NULLABLE" },
+  { "name": "state_code",    "type": "STRING",  "mode": "NULLABLE" },
+  { "name": "city_name",     "type": "STRING",  "mode": "NULLABLE" },
+  { "name": "postal_code",   "type": "STRING",  "mode": "NULLABLE" },
+  { "name": "metro_code",    "type": "STRING",  "mode": "NULLABLE" },
+  { "name": "latitude",      "type": "FLOAT64", "mode": "NULLABLE" },
+  { "name": "longitude",     "type": "FLOAT64", "mode": "NULLABLE" }
+]

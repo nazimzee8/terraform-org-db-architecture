@@ -1,0 +1,6 @@
+[
+  { "name": "industry_id",            "type": "STRING", "mode": "REQUIRED" },
+  { "name": "classification_system",  "type": "STRING", "mode": "NULLABLE" },
+  { "name": "industry_code",          "type": "STRING", "mode": "NULLABLE" },
+  { "name": "industry_name",          "type": "STRING", "mode": "NULLABLE" }
+]

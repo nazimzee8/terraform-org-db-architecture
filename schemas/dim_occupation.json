@@ -1,0 +1,6 @@
+[
+  { "name": "occupation_id",     "type": "STRING", "mode": "REQUIRED" },
+  { "name": "standard_system",   "type": "STRING", "mode": "NULLABLE" },
+  { "name": "standard_code",     "type": "STRING", "mode": "NULLABLE" },
+  { "name": "occupation_title",  "type": "STRING", "mode": "NULLABLE" }
+]

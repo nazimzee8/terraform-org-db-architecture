@@ -1,0 +1,6 @@
+[
+  { "name": "employer_id",               "type": "STRING", "mode": "REQUIRED" },
+  { "name": "employer_name",             "type": "STRING", "mode": "NULLABLE" },
+  { "name": "normalized_employer_name",  "type": "STRING", "mode": "NULLABLE" },
+  { "name": "employer_type",             "type": "STRING", "mode": "NULLABLE" }
+]

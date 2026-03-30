@@ -1,0 +1,7 @@
+[
+  { "name": "raw_usajobs_id",       "type": "STRING",    "mode": "REQUIRED" },
+  { "name": "source_id",            "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "source_posting_key",   "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "retrieved_at",         "type": "TIMESTAMP", "mode": "NULLABLE" },
+  { "name": "raw_payload",          "type": "JSON",      "mode": "NULLABLE" }
+]

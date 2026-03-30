@@ -1,0 +1,23 @@
+[
+  { "name": "job_posting_id",              "type": "STRING",    "mode": "REQUIRED" },
+  { "name": "source_id",                   "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "source_posting_key",          "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "posting_url",                 "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "job_title",                   "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "job_description",             "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "employment_type",             "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "remote_type",                 "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "posted_time_id",              "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "closing_time_id",             "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "location_id",                 "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "employer_id",                 "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "occupation_id",               "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "industry_id",                 "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "salary_min",                  "type": "NUMERIC",   "mode": "NULLABLE" },
+  { "name": "salary_max",                  "type": "NUMERIC",   "mode": "NULLABLE" },
+  { "name": "salary_currency",             "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "salary_interval",             "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "required_experience_level",   "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "source_status",               "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "posted_date",                 "type": "DATE",      "mode": "NULLABLE" }
+]

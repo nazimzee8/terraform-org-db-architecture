@@ -185,21 +185,25 @@ provider "google" {
   region  = var.region
 }
 
+data "google_project" "current" {}
+
 locals {
   sa_scraper   = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
   sa_loader    = "serviceAccount:sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
   sa_scheduler = "serviceAccount:sa-scheduler@${var.project_id}.iam.gserviceaccount.com"
   sa_manager   = "serviceAccount:sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
-  sa_secret_manager = "sa-secret-manager@${var.project_id}.iam.gserviceaccount.com"
-  sa_event_trigger = "sa-event-trigger@${var.project_id}.iam.gserviceaccount.com"
-  sa_workflow = "sa-data-workflow@${var.project_id}.iam.gserviceaccount.com"
+  sa_secret_manager      = "serviceAccount:sa-secret-manager@${var.project_id}.iam.gserviceaccount.com"
+  sa_event_trigger       = "serviceAccount:sa-event-trigger@${var.project_id}.iam.gserviceaccount.com"
+  sa_workflow            = "serviceAccount:sa-data-workflow@${var.project_id}.iam.gserviceaccount.com"
+  sa_workflow_email      = "sa-data-workflow@${var.project_id}.iam.gserviceaccount.com"
+  sa_event_trigger_email = "sa-event-trigger@${var.project_id}.iam.gserviceaccount.com"
 }
 
 locals {
   non_secret_bq_env = {
     BQ_PROJECT_ID = var.project_id
     BQ_DATASET_ID = var.bq_dataset_id
-    BQ_TABLES = var.bq_tables
+    BQ_LOAD_JOB_ID = var.bq_load_job_id
   }
 }
 
@@ -213,7 +217,8 @@ locals {
     (local.sa_loader) = concat(
       [
         "roles/vpcaccess.user",
-        "roles/logging.logWriter"
+        "roles/logging.logWriter",
+        "roles/bigquery.jobUser"
       ],
       var.enable_cloudsql ? ["roles/cloudsql.client"] : []
     )
@@ -238,7 +243,7 @@ locals {
     ]
     (local.sa_workflow) = [
       "roles/logging.logWriter",
-      "roles/bigquery.jobUser"
+      "roles/bigquery.jobUser",
       "roles/bigquery.dataEditor"
     ]
   }
@@ -405,11 +410,11 @@ resource "google_secret_manager_secret_iam_member" "scraper_adzuna_api_accessor"
   member    = local.sa_scraper
 }
 
-# Enable loader agent to read and write data from our big query dataset.
+# Enable loader agent to read data from our big query dataset.
 resource "google_bigquery_dataset_iam_member" "loader_dataset_viewer" {
   project    = var.project_id
   dataset_id = var.bq_dataset_id
-  role       = "roles/bigquery.dataEditor"
+  role       = "roles/bigquery.dataViewer"
   member     = local.sa_loader
 }
 
@@ -419,7 +424,7 @@ resource "google_cloud_run_v2_job_iam_member" "workflow_invokes_loader" {
   location = var.region
   name     = var.loader_job_name
   role   = "roles/run.invoker"
-  member = local.sa_loader
+  member = local.sa_workflow
 }
 
 # Enable access to bigquery password.
@@ -464,10 +469,12 @@ resource "google_compute_subnetwork" "connector_subnet" {
 
 # Create the VPC connector to connect our Cloud Run jobs to our VPC.
 resource "google_vpc_access_connector" "connector" {
-  name = "nazimz-connector"
+  name   = "nazimz-connector"
   region = var.region
-  network = google_compute_network.vpc_network.self_link
-  ip_cidr_range = google_compute_subnetwork.connector_subnet.ip_cidr_range
+  subnet {
+    name       = google_compute_subnetwork.connector_subnet.name
+    project_id = var.project_id
+  }
 }
 
 # Create the Cloud Router for our Cloud NAT
@@ -669,12 +676,16 @@ resource "google_eventarc_trigger" "bucket_trigger" {
     value     = var.storage_bucket_name
   }
 
+  event_data_content_type = "application/json"
+  service_account         = local.sa_event_trigger_email
+
   # Destination is a workflow that sends the trigger to our Cloud Storage Bucket
   destination {
-    workflow = google_workflows_workflow.etl-workflow.id
+    workflow = google_workflows_workflow.etl_workflow.id
   }
-
-  depends_on = [local.sa_event_trigger]
+  depends_on = [
+    google_workflows_workflow.etl_workflow
+  ]
 }
 
 # Enable EventArc to read and retrieve data from GCS Bucket
@@ -684,33 +695,197 @@ resource "google_storage_bucket_iam_member" "event_bucket_retrieval" {
   member = local.sa_event_trigger
 }
 
-# Create workflow resource
-resource "google_workflows_workflow" "etl-workflow" {
-  name          = var.workflow_name
-  region        = var.region
-  description   = "Automatically retrieves data from GCS Bucket to BigQuery Dataset."
-  service_account = local.sa_workflow
-  call_log_level = "LOG_ERRORS_ONLY"
-  dynamic "env" {
-    for_each = local.non_secret_bq_env
-    content {
-      name = env.key
-      value = env.value
-    }
-  }
-  env {
-    name = "INGESTION_BUCKET"
-    value = google_storage_bucket.ingestion_bucket.name
-  }
-  env {
-    name = "EVENT_TRIGGER"
-    value = google_eventarc_trigger.bucket_trigger.id
-  }
+resource "google_workflows_workflow" "etl_workflow" {
+  name                = var.workflow_name
+  region              = var.region
+  description         = "GCS -> BigQuery raw load -> BigQuery transform -> Cloud Run loader -> Cloud SQL"
+  service_account     = local.sa_workflow_email
+  call_log_level      = "LOG_ERRORS_ONLY"
   deletion_protection = false
+
+  user_env_vars = {
+    PROJECT_ID        = var.project_id
+    BQ_DATASET_ID     = var.bq_dataset_id
+    BQ_LOCATION       = "US"
+    INGESTION_BUCKET  = google_storage_bucket.ingestion_bucket.name
+
+    RAW_BLS_TABLE     = "raw_bls_observation"
+    RAW_USAJOBS_TABLE = "raw_usajobs_posting"
+    RAW_ADZUNA_TABLE  = "raw_adzuna_posting"
+
+    LOADER_JOB_NAME   = var.loader_job_name
+    LOADER_JOB_REGION = var.region
+  }
+
+  source_contents = <<-YAML
+  main:
+    params: [event]
+    steps:
+      - init:
+          assign:
+            - project_id: $${sys.get_env("PROJECT_ID")}
+            - dataset_id: $${sys.get_env("BQ_DATASET_ID")}
+            - bq_location: $${sys.get_env("BQ_LOCATION")}
+            - expected_bucket: $${sys.get_env("INGESTION_BUCKET")}
+            - loader_job_name: $${sys.get_env("LOADER_JOB_NAME")}
+            - loader_job_region: $${sys.get_env("LOADER_JOB_REGION")}
+
+            - bucket: $${event.data.bucket}
+            - object_name: $${event.data.name}
+            - source_uri: $${"gs://" + event.data.bucket + "/" + event.data.name}
+
+      - validate_bucket:
+          switch:
+            - condition: $${bucket != expected_bucket}
+              raise: $${"Unexpected bucket received: " + bucket}
+
+      - route_file:
+          switch:
+            - condition: $${text.match_regex(object_name, "^raw/bls/.*\\.csv$")}
+              next: set_bls_config
+            - condition: $${text.match_regex(object_name, "^raw/usajobs/.*\\.json$")}
+              next: set_usajobs_config
+            - condition: $${text.match_regex(object_name, "^raw/adzuna/.*\\.json$")}
+              next: set_adzuna_config
+          next: unsupported_file
+
+      - unsupported_file:
+          raise: $${"Unsupported object path: " + object_name}
+
+      - set_bls_config:
+          assign:
+            - raw_table: $${sys.get_env("RAW_BLS_TABLE")}
+            - source_format: "CSV"
+            - skip_leading_rows: 1
+            - transform_sql: $${"CALL `" + project_id + "." + dataset_id + ".sp_transform_bls`();"}
+          next: start_load_job
+
+      - set_usajobs_config:
+          assign:
+            - raw_table: $${sys.get_env("RAW_USAJOBS_TABLE")}
+            - source_format: "NEWLINE_DELIMITED_JSON"
+            - skip_leading_rows: 0
+            - transform_sql: $${"CALL `" + project_id + "." + dataset_id + ".sp_transform_usajobs`();"}
+          next: start_load_job
+
+      - set_adzuna_config:
+          assign:
+            - raw_table: $${sys.get_env("RAW_ADZUNA_TABLE")}
+            - source_format: "NEWLINE_DELIMITED_JSON"
+            - skip_leading_rows: 0
+            - transform_sql: $${"CALL `" + project_id + "." + dataset_id + ".sp_transform_adzuna`();"}
+          next: start_load_job
+
+      - start_load_job:
+          call: googleapis.bigquery.v2.jobs.insert
+          args:
+            projectId: $${project_id}
+            body:
+              jobReference:
+                location: $${bq_location}
+              configuration:
+                load:
+                  sourceUris:
+                    - $${source_uri}
+                  destinationTable:
+                    projectId: $${project_id}
+                    datasetId: $${dataset_id}
+                    tableId: $${raw_table}
+                  sourceFormat: $${source_format}
+                  skipLeadingRows: $${skip_leading_rows}
+                  writeDisposition: "WRITE_APPEND"
+          result: load_job
+
+      - poll_load_job:
+          call: googleapis.bigquery.v2.jobs.get
+          args:
+            projectId: $${project_id}
+            jobId: $${load_job.jobReference.jobId}
+            location: $${bq_location}
+          result: load_status
+
+      - check_load_job:
+          switch:
+            - condition: $${load_status.status.state == "DONE" and not("errorResult" in load_status.status)}
+              next: start_transform_job
+            - condition: $${load_status.status.state == "DONE" and ("errorResult" in load_status.status)}
+              raise: $${load_status.status.errorResult}
+          next: wait_before_retry_load
+
+      - wait_before_retry_load:
+          call: sys.sleep
+          args:
+            seconds: 5
+          next: poll_load_job
+
+      - start_transform_job:
+          call: googleapis.bigquery.v2.jobs.insert
+          args:
+            projectId: $${project_id}
+            body:
+              jobReference:
+                location: $${bq_location}
+              configuration:
+                query:
+                  useLegacySql: false
+                  query: $${transform_sql}
+          result: transform_job
+
+      - poll_transform_job:
+          call: googleapis.bigquery.v2.jobs.get
+          args:
+            projectId: $${project_id}
+            jobId: $${transform_job.jobReference.jobId}
+            location: $${bq_location}
+          result: transform_status
+
+      - check_transform_job:
+          switch:
+            - condition: $${transform_status.status.state == "DONE" and not("errorResult" in transform_status.status)}
+              next: run_loader_job
+            - condition: $${transform_status.status.state == "DONE" and ("errorResult" in transform_status.status)}
+              raise: $${transform_status.status.errorResult}
+          next: wait_before_retry_transform
+
+      - wait_before_retry_transform:
+          call: sys.sleep
+          args:
+            seconds: 5
+          next: poll_transform_job
+
+      - run_loader_job:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: $${"projects/" + project_id + "/locations/" + loader_job_region + "/jobs/" + loader_job_name}
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: "BQ_DATASET_ID"
+                        value: $${dataset_id}
+                      - name: "TRIGGER_OBJECT"
+                        value: $${object_name}
+                      - name: "RAW_TABLE"
+                        value: $${raw_table}
+          result: loader_execution
+
+      - done:
+          return:
+            message: "ETL pipeline completed successfully"
+            source_uri: $${source_uri}
+            raw_table: $${raw_table}
+            load_job_id: $${load_job.jobReference.jobId}
+            transform_job_id: $${transform_job.jobReference.jobId}
+            loader_execution_name: $${loader_execution.name}
+  YAML
+
+  depends_on = [
+    google_storage_bucket.ingestion_bucket
+  ]
 }
 
-# Enable  workflow agent to retrieve data from Google Cloud Storage Bucket
-resource "google_storage_bucket_iam_member" "scraper_bucket_writer" {
+# Enable workflow agent to retrieve data from Google Cloud Storage Bucket
+resource "google_storage_bucket_iam_member" "workflow_bucket_reader" {
   bucket = var.storage_bucket_name
   role   = "roles/storage.objectViewer"
   member = local.sa_workflow
@@ -720,7 +895,7 @@ resource "google_storage_bucket_iam_member" "scraper_bucket_writer" {
 resource "google_bigquery_dataset_iam_member" "workflow_dataset_user" {
   project    = var.project_id
   dataset_id = var.bq_dataset_id
-  role       = "roles/bigquery.user"
+  role       = "roles/bigquery.dataEditor"
   member     = local.sa_workflow
 }
 
@@ -758,11 +933,7 @@ resource "google_cloud_run_v2_job" "loader_job" {
           name = "BQ_DATASET_ID" 
           value = var.bq_dataset_id 
         }
-        env { 
-          name = "BQ_TABLE_ID" 
-          value = var.bq_table_id 
-        }
-        env { 
+        env {
           name = "DB_HOST" 
           value = google_sql_database_instance.private_db_instance.private_ip_address 
         }
@@ -788,215 +959,12 @@ resource "google_cloud_run_v2_job" "loader_job" {
   }
 }
 
-# Configure BigQuery job to load data into BigQuery
-resource "google_bigquery_job" "bq_load_job" {
-  for_each = {
-    raw_bls_observation = {
-      source_uri        = "gs://${var.storage_bucket_name}/bls/*.json"
-      source_format     = "NEWLINE_DELIMITED_JSON"
-      write_disposition = "WRITE_TRUNCATE"
-    }
-    raw_usajobs_posting = {
-      source_uri        = "gs://${var.storage_bucket_name}/usajobs/*.json"
-      source_format     = "NEWLINE_DELIMITED_JSON"
-      write_disposition = "WRITE_TRUNCATE"
-    }
-    raw_adzuna_posting = {
-      source_uri        = "gs://${var.storage_bucket_name}/adzuna/*.json"
-      source_format     = "NEWLINE_DELIMITED_JSON"
-      write_disposition = "WRITE_TRUNCATE"
-    }
-  }
-
-  project  = var.project_id
-  location = var.region
-  job_id   = "${each.key}-${formatdate("YYYYMMDDHHmmss", timestamp())}"
-
-  load {
-    source_uris = [each.value.source_uri]
-
-    destination_table {
-      project_id = var.project_id
-      dataset_id = var.bq_dataset_id
-      table_id   = each.key
-    }
-
-    source_format     = each.value.source_format
-    write_disposition = each.value.write_disposition
-    autodetect        = false
-  }
-
-  depends_on = [google_bigquery_table.raw_tables]
-}
-
-resource "google_bigquery_job" "bq_transform_job" {
-  job_id   = "${var.bq_load_job_id}-${formatdate("YYYYMMDDHHmmss", timestamp())}"
-  project  = var.project_id
-  location = "US"
-
-  query {
-    use_legacy_sql = false
-
-    query = <<-SQL
-      SET @@dataset_project_id = '${var.project_id}';
-      SET @@dataset_id = '${var.bq_dataset_id}';
-
-      -- Optional: clear target tables first if doing full refresh
-      TRUNCATE TABLE dim_source_system;
-      TRUNCATE TABLE dim_time_period;
-      TRUNCATE TABLE dim_location;
-      TRUNCATE TABLE dim_occupation;
-      TRUNCATE TABLE dim_industry;
-      TRUNCATE TABLE dim_employer;
-      TRUNCATE TABLE xref_occupation;
-      TRUNCATE TABLE xref_industry;
-      TRUNCATE TABLE curated_labor_metric;
-      TRUNCATE TABLE curated_bls_series;
-      TRUNCATE TABLE fact_labor_observation;
-      TRUNCATE TABLE fact_job_posting;
-
-      -- Stage BLS
-      CREATE TEMP TABLE stg_bls AS
-      SELECT
-        'bls' AS source_code,
-        series_id AS bls_series_id,
-        year,
-        period,
-        value,
-        CONCAT(year, '-', period) AS time_period_code
-      FROM bls_raw;
-
-      -- Stage USAJobs
-      CREATE TEMP TABLE stg_usajobs AS
-      SELECT
-        'usajobs' AS source_code,
-        CAST(PositionID AS STRING) AS source_record_id,
-        CAST(PositionTitle AS STRING) AS occupation_name,
-        CAST(OrganizationName AS STRING) AS employer_name,
-        CAST(PositionLocationDisplay AS STRING) AS location_name,
-        SAFE_CAST(PublicationStartDate AS TIMESTAMP) AS posted_at
-      FROM usajobs_raw;
-
-      -- Stage Adzuna
-      CREATE TEMP TABLE stg_adzuna AS
-      SELECT
-        'adzuna' AS source_code,
-        CAST(id AS STRING) AS source_record_id,
-        CAST(title AS STRING) AS occupation_name,
-        CAST(company_display_name AS STRING) AS employer_name,
-        CAST(location_display_name AS STRING) AS location_name,
-        SAFE_CAST(created AS TIMESTAMP) AS posted_at
-      FROM adzuna_raw;
-
-      -- Dimensions
-      INSERT INTO dim_source_system (source_id, source_code)
-      SELECT 1, 'bls'
-      UNION ALL SELECT 2, 'usajobs'
-      UNION ALL SELECT 3, 'adzuna';
-
-      INSERT INTO dim_time_period (time_period_id, time_period_code)
-      SELECT
-        ROW_NUMBER() OVER (ORDER BY time_period_code) AS time_period_id,
-        time_period_code
-      FROM (
-        SELECT DISTINCT time_period_code FROM stg_bls
-      );
-
-      INSERT INTO dim_employer (employer_id, employer_name)
-      SELECT
-        ROW_NUMBER() OVER (ORDER BY employer_name) AS employer_id,
-        employer_name
-      FROM (
-        SELECT DISTINCT employer_name FROM stg_usajobs WHERE employer_name IS NOT NULL
-        UNION DISTINCT
-        SELECT DISTINCT employer_name FROM stg_adzuna WHERE employer_name IS NOT NULL
-      );
-
-      INSERT INTO dim_occupation (occupation_id, occupation_name)
-      SELECT
-        ROW_NUMBER() OVER (ORDER BY occupation_name) AS occupation_id,
-        occupation_name
-      FROM (
-        SELECT DISTINCT occupation_name FROM stg_usajobs WHERE occupation_name IS NOT NULL
-        UNION DISTINCT
-        SELECT DISTINCT occupation_name FROM stg_adzuna WHERE occupation_name IS NOT NULL
-      );
-
-      INSERT INTO dim_location (location_id, location_name)
-      SELECT
-        ROW_NUMBER() OVER (ORDER BY location_name) AS location_id,
-        location_name
-      FROM (
-        SELECT DISTINCT location_name FROM stg_usajobs WHERE location_name IS NOT NULL
-        UNION DISTINCT
-        SELECT DISTINCT location_name FROM stg_adzuna WHERE location_name IS NOT NULL
-      );
-
-      -- Curated BLS tables
-      INSERT INTO curated_bls_series (bls_series_id, source_id)
-      SELECT DISTINCT
-        bls_series_id,
-        1
-      FROM stg_bls;
-
-      INSERT INTO curated_labor_metric (metric_id, metric_name)
-      SELECT 1, 'labor_observation';
-
-      -- Facts
-      INSERT INTO fact_labor_observation (
-        bls_series_id,
-        observation_date,
-        metric_value
-      )
-      SELECT
-        bls_series_id,
-        PARSE_DATE('%Y-%m', REPLACE(time_period_code, 'M', '')) AS observation_date,
-        SAFE_CAST(value AS NUMERIC) AS metric_value
-      FROM stg_bls;
-
-      INSERT INTO fact_job_posting (
-        source_id,
-        occupation_id,
-        employer_id,
-        location_id,
-        posted_at,
-        source_record_id
-      )
-      SELECT
-        2 AS source_id,
-        o.occupation_id,
-        e.employer_id,
-        l.location_id,
-        s.posted_at,
-        s.source_record_id
-      FROM stg_usajobs s
-      LEFT JOIN dim_occupation o ON s.occupation_name = o.occupation_name
-      LEFT JOIN dim_employer e ON s.employer_name = e.employer_name
-      LEFT JOIN dim_location l ON s.location_name = l.location_name
-
-      UNION ALL
-
-      SELECT
-        3 AS source_id,
-        o.occupation_id,
-        e.employer_id,
-        l.location_id,
-        s.posted_at,
-        s.source_record_id
-      FROM stg_adzuna s
-      LEFT JOIN dim_occupation o ON s.occupation_name = o.occupation_name
-      LEFT JOIN dim_employer e ON s.employer_name = e.employer_name
-      LEFT JOIN dim_location l ON s.location_name = l.location_name;
-    SQL
-  }
-}
 
 # Configure our bigquery dataset for data transformation.
 resource "google_bigquery_dataset" "employment_analytics" {
-  dataset_id = var.bq_dataset_id
-  location = var.region
+  dataset_id  = var.bq_dataset_id
+  location    = "US"
   description = "Dataset used for loading into private database"
-  default_table_expiration_ms = 3600000
   labels = {
     env = "dev"
   }
@@ -1015,7 +983,7 @@ resource "google_bigquery_dataset" "employment_analytics" {
 }
 
 resource "google_bigquery_table" "raw_tables" {
-  for_each   = var.bq_traw_tables
+  for_each   = var.bq_raw_tables
   project    = var.project_id
   dataset_id = google_bigquery_dataset.employment_analytics.dataset_id
   table_id   = each.key
@@ -1055,4 +1023,67 @@ resource "google_bigquery_table" "transformed_tables" {
       expiration_ms = try(time_partitioning.value.expiration_ms, null)
     }
   }
+}
+
+# Stored procedures called by the Workflow transform step.
+# Full transformation SQL to be developed alongside the Python backend.
+resource "google_bigquery_routine" "sp_transform_bls" {
+  dataset_id   = google_bigquery_dataset.employment_analytics.dataset_id
+  routine_id   = "sp_transform_bls"
+  routine_type = "PROCEDURE"
+  language     = "SQL"
+  definition_body = <<-SQL
+    BEGIN
+      -- Populate dim_time_period from raw_bls_observation
+      MERGE `${var.project_id}.${var.bq_dataset_id}.dim_time_period` T
+      USING (
+        SELECT DISTINCT
+          CONCAT(CAST(observation_year AS STRING), '-', observation_period) AS time_id,
+          DATE(observation_year, CAST(SUBSTR(observation_period, 2) AS INT64), 1) AS calendar_date,
+          observation_year AS year,
+          CAST(SUBSTR(observation_period, 2) AS INT64) AS month
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_bls_observation`
+        WHERE observation_period LIKE 'M%'
+      ) S ON T.time_id = S.time_id
+      WHEN NOT MATCHED THEN
+        INSERT (time_id, calendar_date, year, month, period_type)
+        VALUES (S.time_id, S.calendar_date, S.year, S.month, 'MONTH');
+
+      -- Populate curated_bls_series and fact_labor_observation
+      -- (full mapping to be completed with Python scraper field names)
+    END
+  SQL
+  depends_on = [google_bigquery_table.transformed_tables]
+}
+
+resource "google_bigquery_routine" "sp_transform_usajobs" {
+  dataset_id   = google_bigquery_dataset.employment_analytics.dataset_id
+  routine_id   = "sp_transform_usajobs"
+  routine_type = "PROCEDURE"
+  language     = "SQL"
+  definition_body = <<-SQL
+    BEGIN
+      -- Populate dim_employer, dim_occupation, dim_location from raw_usajobs_posting
+      -- Populate fact_job_posting
+      -- (full mapping to be completed with Python scraper field names)
+      SELECT 1;
+    END
+  SQL
+  depends_on = [google_bigquery_table.transformed_tables]
+}
+
+resource "google_bigquery_routine" "sp_transform_adzuna" {
+  dataset_id   = google_bigquery_dataset.employment_analytics.dataset_id
+  routine_id   = "sp_transform_adzuna"
+  routine_type = "PROCEDURE"
+  language     = "SQL"
+  definition_body = <<-SQL
+    BEGIN
+      -- Populate dim_employer, dim_occupation, dim_location from raw_adzuna_posting
+      -- Populate fact_job_posting
+      -- (full mapping to be completed with Python scraper field names)
+      SELECT 1;
+    END
+  SQL
+  depends_on = [google_bigquery_table.transformed_tables]
 }

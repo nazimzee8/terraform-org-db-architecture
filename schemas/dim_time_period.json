@@ -1,0 +1,9 @@
+[
+  { "name": "time_id",       "type": "STRING", "mode": "REQUIRED" },
+  { "name": "calendar_date", "type": "DATE",   "mode": "NULLABLE" },
+  { "name": "year",          "type": "INT64",  "mode": "NULLABLE" },
+  { "name": "quarter",       "type": "INT64",  "mode": "NULLABLE" },
+  { "name": "month",         "type": "INT64",  "mode": "NULLABLE" },
+  { "name": "week",          "type": "INT64",  "mode": "NULLABLE" },
+  { "name": "period_type",   "type": "STRING", "mode": "NULLABLE" }
+]

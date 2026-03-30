@@ -1,6 +1,5 @@
 project_id            = "nazimz-database"
 region                = "us-west2"
-job_source            = "usajobs" || "adzuna" || "multi"
 storage_bucket_name   = "nazimz-db-bucket"
 workflow_name         = "nazimz-etl-workflow"
 bq_dataset_id         = "employment_analytics"
@@ -15,10 +14,6 @@ bq_raw_tables = {
   raw_bls_observation = {
     deletion_protection = true
     schema_path         = "schemas/raw_bls_observation.json"
-    source_uri          = "gs://$(storage_bucket_name)/raw/bls/*.csv"
-    source_format       = "CSV"
-    skip_leading_rows   = 1
-    autodetect          = false
     time_partitioning = {
       type  = "DAY"
       field = "ingested_at"
@@ -28,9 +23,6 @@ bq_raw_tables = {
   raw_usajobs_posting = {
     deletion_protection = true
     schema_path         = "schemas/raw_usajobs_posting.json"
-    source_uri          = "gs://$(storage_bucket_name)/raw/usajobs/*.json"
-    source_format       = "NEWLINE_DELIMITED_JSON"
-    autodetect          = false
     time_partitioning = {
       type  = "DAY"
       field = "retrieved_at"
@@ -40,9 +32,6 @@ bq_raw_tables = {
   raw_adzuna_posting = {
     deletion_protection = true
     schema_path         = "schemas/raw_adzuna_posting.json"
-    source_uri          = "gs://$(storage_bucket_name)/raw/adzuna/*.json"
-    source_format       = "NEWLINE_DELIMITED_JSON"
-    autodetect          = false
     time_partitioning = {
       type  = "DAY"
       field = "retrieved_at"
@@ -117,7 +106,7 @@ bq_transformed_tables = {
     clustering          = ["source_id", "occupation_id", "location_id"]
     time_partitioning = {
       type  = "DAY"
-      field = "posted_at"
+      field = "posted_date"
     }
   }
 }

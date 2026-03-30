@@ -1,0 +1,7 @@
+[
+  { "name": "xref_occupation_id",        "type": "STRING", "mode": "REQUIRED" },
+  { "name": "source_id",                 "type": "STRING", "mode": "NULLABLE" },
+  { "name": "source_occupation_code",    "type": "STRING", "mode": "NULLABLE" },
+  { "name": "source_occupation_title",   "type": "STRING", "mode": "NULLABLE" },
+  { "name": "occupation_id",             "type": "STRING", "mode": "NULLABLE" }
+]
