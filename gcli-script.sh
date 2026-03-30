@@ -20,6 +20,14 @@ gcloud iam service-accounts create sa-manager-infra \
 	--display-name="Database Management Service Account" \
 	--description="Service account used creating the network connections and managing the database."
 
+gcloud iam service-accounts create sa-secret-manager \
+	--display-name="Secret Manager Service Account" \
+	--description="Service account used for managing secrets in Secret Manager for this ETL pipeline."
+
+gcloud iam service-accounts create sa-data-workflow \
+	--display-name="Data Workflow Service Account" \
+	--description="Service account used for managing the data workflow for this ETL pipeline."
+
 gcloud projects get-iam-policy nazimz-database --format=json > policy.json
 
 gcloud projects set-iam-policy nazimz-database policy.json

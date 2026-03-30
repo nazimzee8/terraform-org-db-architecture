@@ -122,15 +122,50 @@ variable "keywords_list" {
 }
 
 variable "storage_bucket_name" {type = string}
-
+variable "workflow_name" {type = string}
+variable "bq_load_job_id" {type = string}
+variable "bq_query_job_id" {type = string}
 variable "bq_dataset_id"  {type = string}
-variable "bq_table_id"    {type = string}
+
+variable "bq_raw_tables" {
+  description = "Map of BigQuery tables to create"
+  type = map(object({
+    deletion_protection = optional(bool, true)
+    schema_path         = optional(string)
+    clustering          = optional(list(string), [])
+    time_partitioning = optional(object({
+      type          = string
+      field         = optional(string)
+      expiration_ms = optional(number)
+    }))
+  }))
+}
+variable "bq_transformed_tables" {
+  description = "Map of BigQuery tables to create"
+  type = map(object({
+    deletion_protection = optional(bool, true)
+    schema_path         = optional(string)
+    clustering          = optional(list(string), [])
+    time_partitioning = optional(object({
+      type          = string
+      field         = optional(string)
+      expiration_ms = optional(number)
+    }))
+  }))
+}
+
+variable "common_labels" {
+  type    = map(string)
+  default = {}
+}
 
 variable "adzuna_app_id"  {type = string}
 variable "adzuna_key"     {type = string}
 variable "adzuna_country" {type = string}  
 
-variable usajobs_user_email {type = string}
+variable "bls_key" {type = string}
+
+variable "usajobs_user_email" {type = string}
 variable "usajobs_key" {type = string}
 
 variable "scraper_job_name" {type = string}
@@ -155,36 +190,56 @@ locals {
   sa_loader    = "serviceAccount:sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
   sa_scheduler = "serviceAccount:sa-scheduler@${var.project_id}.iam.gserviceaccount.com"
   sa_manager   = "serviceAccount:sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
+  sa_secret_manager = "sa-secret-manager@${var.project_id}.iam.gserviceaccount.com"
+  sa_event_trigger = "sa-event-trigger@${var.project_id}.iam.gserviceaccount.com"
+  sa_workflow = "sa-data-workflow@${var.project_id}.iam.gserviceaccount.com"
 }
 
 locals {
-  non_secret_env = {
+  non_secret_bq_env = {
     BQ_PROJECT_ID = var.project_id
     BQ_DATASET_ID = var.bq_dataset_id
-    BQ_TABLE_ID   = var.bq_table_id
-    ADZUNA_COUNTRY   = var.adzuna_country
+    BQ_TABLES = var.bq_tables
   }
 }
 
 locals {
   project_roles_by_member = {
     (local.sa_scraper) = [
-      "roles/vpcaccess.user"
+      "roles/vpcaccess.user",
+      "roles/logging.logWriter"
     ]
 
     (local.sa_loader) = concat(
       [
         "roles/vpcaccess.user",
-        "roles/bigquery.jobUser",
+        "roles/logging.logWriter"
       ],
       var.enable_cloudsql ? ["roles/cloudsql.client"] : []
     )
 
-    (local.sa_manager) = [
+    (local.sa_manager) = concat(
+      [
       "roles/compute.networkAdmin",
       "roles/run.admin",
-      "roles/config.admin",
-      "roles/cloudkms.cryptoKeyEncrypter"
+      "roles/bigquery.dataOwner",
+      "roles/storage.admin", 
+      "roles/workflows.admin"],
+      var.enable_cloudsql ? ["roles/cloudsql.editor"] : []
+    )
+
+    (local.sa_secret_manager) = [
+      "roles/secretmanager.secretAccessor",
+      "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+    ]
+    (local.sa_event_trigger) = [
+      "roles/workflows.invoker",
+      "roles/pubsub.publisher"
+    ]
+    (local.sa_workflow) = [
+      "roles/logging.logWriter",
+      "roles/bigquery.jobUser"
+      "roles/bigquery.dataEditor"
     ]
   }
 
@@ -223,10 +278,30 @@ resource "google_kms_crypto_key" "secrets" {
   rotation_period = "7776000s" 
 }
 
+# Grant Google Service Account encyrpt and decrypt access using our custom key. 
+resource "google_kms_crypto_key_iam_member" "secretmanager_cmek" {
+  crypto_key_id = google_kms_crypto_key.secrets.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-secretmanager.iam.gserviceaccount.com"
+}
+
+# Configure secret for API Key for BLS
+resource "google_secret_manager_secret" "bls_api_key" {
+  project   = var.project_id
+  secret_id = "BLS_API_KEY"
+  replication { 
+    auto {
+      customer_managed_encryption {
+        kms_key_name = google_kms_crypto_key.secrets.id
+      }
+    } 
+  }
+}
+
 # Configure secret for user credentials for USAjobs
 resource "google_secret_manager_secret" "usajobs_user_email" {
   project   = var.project_id
-  secret_id = "usajobs_user_email"
+  secret_id = "USAJOBS_EMAIL"
   replication { 
     auto {
       customer_managed_encryption {
@@ -239,7 +314,7 @@ resource "google_secret_manager_secret" "usajobs_user_email" {
 # Configure secret for API Key received from USAJobs
 resource "google_secret_manager_secret" "usajobs_api_key" {
   project   = var.project_id
-  secret_id = "usajobs_api_key"
+  secret_id = "USAJOBS_API_KEY"
   replication { 
     auto {
       customer_managed_encryption {
@@ -252,7 +327,7 @@ resource "google_secret_manager_secret" "usajobs_api_key" {
 # Configure secret for App ID received from Adzuna
 resource "google_secret_manager_secret" "adzuna_app_id" {
   project   = var.project_id
-  secret_id = "adzuna_app_id"
+  secret_id = "ADZUNA_APP_ID"
   replication { 
     auto {
       customer_managed_encryption {
@@ -265,7 +340,7 @@ resource "google_secret_manager_secret" "adzuna_app_id" {
 # Configure secret for API Key received from Adzuna
 resource "google_secret_manager_secret" "adzuna_api_key" {
   project   = var.project_id
-  secret_id = "adzuna_api_key"
+  secret_id = "ADZUNA_API_KEY"
   replication { 
     auto {
       customer_managed_encryption {
@@ -278,7 +353,7 @@ resource "google_secret_manager_secret" "adzuna_api_key" {
 # Configure secret for bigquery password.
 resource "google_secret_manager_secret" "db_master_pwd" {
   project   = var.project_id
-  secret_id = "db_master_pwd"
+  secret_id = "DB_MASTER_PWD"
   replication { 
     auto {
       customer_managed_encryption {
@@ -295,11 +370,11 @@ resource "google_storage_bucket_iam_member" "scraper_bucket_writer" {
   member = local.sa_scraper
 }
 
-# Grant scraper service account encrypt/decrypt permissions on the crypto key
-resource "google_kms_crypto_key_iam_member" "scraper_key_encrypter_decrypter" {
-  crypto_key_id = google_kms_crypto_key.secrets.id
-  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
-  member        = local.sa_scraper
+# Enable access to usajobs user email
+resource "google_secret_manager_secret_iam_member" "scraper_bls_key_accessor" {
+  secret_id = google_secret_manager_secret.bls_api_key.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = local.sa_scraper
 }
 
 # Enable access to usajobs user email
@@ -330,12 +405,21 @@ resource "google_secret_manager_secret_iam_member" "scraper_adzuna_api_accessor"
   member    = local.sa_scraper
 }
 
-# Role for loader to read data from our big query dataset.
+# Enable loader agent to read and write data from our big query dataset.
 resource "google_bigquery_dataset_iam_member" "loader_dataset_viewer" {
   project    = var.project_id
   dataset_id = var.bq_dataset_id
-  role       = "roles/bigquery.dataViewer"
+  role       = "roles/bigquery.dataEditor"
   member     = local.sa_loader
+}
+
+# Enable workflow agent to run loader job after data transformation.
+resource "google_cloud_run_v2_job_iam_member" "workflow_invokes_loader" {
+  project  = var.project_id
+  location = var.region
+  name     = var.loader_job_name
+  role   = "roles/run.invoker"
+  member = local.sa_loader
 }
 
 # Enable access to bigquery password.
@@ -489,7 +573,7 @@ resource "google_cloud_run_v2_job" "scraper_job" {
         image = var.scraper_image
         
         dynamic "env" {
-          for_each = local.non_secret_env
+          for_each = local.non_secret_bq_env
           content {
             name = env.key
             value = env.value
@@ -497,6 +581,15 @@ resource "google_cloud_run_v2_job" "scraper_job" {
         }
 
         # Secret credentials 
+        env {
+          name = "BLS_API_KEY"
+          value_source {
+            secret_key_ref {
+              secret = google_secret_manager_secret.bls_api_key.secret_id
+              version = "latest"
+            }
+          }
+        }
         env {
           name = "USAJOBS_API_KEY"
           value_source {
@@ -554,6 +647,83 @@ resource "google_cloud_run_v2_job" "scraper_job" {
   }
   depends_on = [google_storage_bucket_iam_member.scraper_bucket_writer]
 }
+
+# Enable eventarc API. 
+resource "google_project_service" "eventarc" {
+  service = "eventarc.googleapis.com"
+}
+
+# Configure an Eventarc trigger for the Cloud Storage Bucket when data is added to the bucket.
+resource "google_eventarc_trigger" "bucket_trigger" {
+  name     = "gcs-bucket-trigger"
+  location = var.region
+
+  matching_criteria {
+    attribute = "type"
+    value     = "google.cloud.storage.object.v1.finalized"
+  }
+  
+  # Ensure matching_criteria includes bucket name
+  matching_criteria {
+    attribute = "bucket"
+    value     = var.storage_bucket_name
+  }
+
+  # Destination is a workflow that sends the trigger to our Cloud Storage Bucket
+  destination {
+    workflow = google_workflows_workflow.etl-workflow.id
+  }
+
+  depends_on = [local.sa_event_trigger]
+}
+
+# Enable EventArc to read and retrieve data from GCS Bucket
+resource "google_storage_bucket_iam_member" "event_bucket_retrieval" {
+  bucket = var.storage_bucket_name
+  role   = "roles/storage.objectViewer"
+  member = local.sa_event_trigger
+}
+
+# Create workflow resource
+resource "google_workflows_workflow" "etl-workflow" {
+  name          = var.workflow_name
+  region        = var.region
+  description   = "Automatically retrieves data from GCS Bucket to BigQuery Dataset."
+  service_account = local.sa_workflow
+  call_log_level = "LOG_ERRORS_ONLY"
+  dynamic "env" {
+    for_each = local.non_secret_bq_env
+    content {
+      name = env.key
+      value = env.value
+    }
+  }
+  env {
+    name = "INGESTION_BUCKET"
+    value = google_storage_bucket.ingestion_bucket.name
+  }
+  env {
+    name = "EVENT_TRIGGER"
+    value = google_eventarc_trigger.bucket_trigger.id
+  }
+  deletion_protection = false
+}
+
+# Enable  workflow agent to retrieve data from Google Cloud Storage Bucket
+resource "google_storage_bucket_iam_member" "scraper_bucket_writer" {
+  bucket = var.storage_bucket_name
+  role   = "roles/storage.objectViewer"
+  member = local.sa_workflow
+}
+
+# Enable workflow agent to read, write, and create datasets for the BigQuery dataset
+resource "google_bigquery_dataset_iam_member" "workflow_dataset_user" {
+  project    = var.project_id
+  dataset_id = var.bq_dataset_id
+  role       = "roles/bigquery.user"
+  member     = local.sa_workflow
+}
+
 
 # Configure the cloud storage bucket for our scraper job to send the data to.
 resource "google_storage_bucket" "ingestion_bucket" {
@@ -618,8 +788,211 @@ resource "google_cloud_run_v2_job" "loader_job" {
   }
 }
 
+# Configure BigQuery job to load data into BigQuery
+resource "google_bigquery_job" "bq_load_job" {
+  for_each = {
+    raw_bls_observation = {
+      source_uri        = "gs://${var.storage_bucket_name}/bls/*.json"
+      source_format     = "NEWLINE_DELIMITED_JSON"
+      write_disposition = "WRITE_TRUNCATE"
+    }
+    raw_usajobs_posting = {
+      source_uri        = "gs://${var.storage_bucket_name}/usajobs/*.json"
+      source_format     = "NEWLINE_DELIMITED_JSON"
+      write_disposition = "WRITE_TRUNCATE"
+    }
+    raw_adzuna_posting = {
+      source_uri        = "gs://${var.storage_bucket_name}/adzuna/*.json"
+      source_format     = "NEWLINE_DELIMITED_JSON"
+      write_disposition = "WRITE_TRUNCATE"
+    }
+  }
+
+  project  = var.project_id
+  location = var.region
+  job_id   = "${each.key}-${formatdate("YYYYMMDDHHmmss", timestamp())}"
+
+  load {
+    source_uris = [each.value.source_uri]
+
+    destination_table {
+      project_id = var.project_id
+      dataset_id = var.bq_dataset_id
+      table_id   = each.key
+    }
+
+    source_format     = each.value.source_format
+    write_disposition = each.value.write_disposition
+    autodetect        = false
+  }
+
+  depends_on = [google_bigquery_table.raw_tables]
+}
+
+resource "google_bigquery_job" "bq_transform_job" {
+  job_id   = "${var.bq_load_job_id}-${formatdate("YYYYMMDDHHmmss", timestamp())}"
+  project  = var.project_id
+  location = "US"
+
+  query {
+    use_legacy_sql = false
+
+    query = <<-SQL
+      SET @@dataset_project_id = '${var.project_id}';
+      SET @@dataset_id = '${var.bq_dataset_id}';
+
+      -- Optional: clear target tables first if doing full refresh
+      TRUNCATE TABLE dim_source_system;
+      TRUNCATE TABLE dim_time_period;
+      TRUNCATE TABLE dim_location;
+      TRUNCATE TABLE dim_occupation;
+      TRUNCATE TABLE dim_industry;
+      TRUNCATE TABLE dim_employer;
+      TRUNCATE TABLE xref_occupation;
+      TRUNCATE TABLE xref_industry;
+      TRUNCATE TABLE curated_labor_metric;
+      TRUNCATE TABLE curated_bls_series;
+      TRUNCATE TABLE fact_labor_observation;
+      TRUNCATE TABLE fact_job_posting;
+
+      -- Stage BLS
+      CREATE TEMP TABLE stg_bls AS
+      SELECT
+        'bls' AS source_code,
+        series_id AS bls_series_id,
+        year,
+        period,
+        value,
+        CONCAT(year, '-', period) AS time_period_code
+      FROM bls_raw;
+
+      -- Stage USAJobs
+      CREATE TEMP TABLE stg_usajobs AS
+      SELECT
+        'usajobs' AS source_code,
+        CAST(PositionID AS STRING) AS source_record_id,
+        CAST(PositionTitle AS STRING) AS occupation_name,
+        CAST(OrganizationName AS STRING) AS employer_name,
+        CAST(PositionLocationDisplay AS STRING) AS location_name,
+        SAFE_CAST(PublicationStartDate AS TIMESTAMP) AS posted_at
+      FROM usajobs_raw;
+
+      -- Stage Adzuna
+      CREATE TEMP TABLE stg_adzuna AS
+      SELECT
+        'adzuna' AS source_code,
+        CAST(id AS STRING) AS source_record_id,
+        CAST(title AS STRING) AS occupation_name,
+        CAST(company_display_name AS STRING) AS employer_name,
+        CAST(location_display_name AS STRING) AS location_name,
+        SAFE_CAST(created AS TIMESTAMP) AS posted_at
+      FROM adzuna_raw;
+
+      -- Dimensions
+      INSERT INTO dim_source_system (source_id, source_code)
+      SELECT 1, 'bls'
+      UNION ALL SELECT 2, 'usajobs'
+      UNION ALL SELECT 3, 'adzuna';
+
+      INSERT INTO dim_time_period (time_period_id, time_period_code)
+      SELECT
+        ROW_NUMBER() OVER (ORDER BY time_period_code) AS time_period_id,
+        time_period_code
+      FROM (
+        SELECT DISTINCT time_period_code FROM stg_bls
+      );
+
+      INSERT INTO dim_employer (employer_id, employer_name)
+      SELECT
+        ROW_NUMBER() OVER (ORDER BY employer_name) AS employer_id,
+        employer_name
+      FROM (
+        SELECT DISTINCT employer_name FROM stg_usajobs WHERE employer_name IS NOT NULL
+        UNION DISTINCT
+        SELECT DISTINCT employer_name FROM stg_adzuna WHERE employer_name IS NOT NULL
+      );
+
+      INSERT INTO dim_occupation (occupation_id, occupation_name)
+      SELECT
+        ROW_NUMBER() OVER (ORDER BY occupation_name) AS occupation_id,
+        occupation_name
+      FROM (
+        SELECT DISTINCT occupation_name FROM stg_usajobs WHERE occupation_name IS NOT NULL
+        UNION DISTINCT
+        SELECT DISTINCT occupation_name FROM stg_adzuna WHERE occupation_name IS NOT NULL
+      );
+
+      INSERT INTO dim_location (location_id, location_name)
+      SELECT
+        ROW_NUMBER() OVER (ORDER BY location_name) AS location_id,
+        location_name
+      FROM (
+        SELECT DISTINCT location_name FROM stg_usajobs WHERE location_name IS NOT NULL
+        UNION DISTINCT
+        SELECT DISTINCT location_name FROM stg_adzuna WHERE location_name IS NOT NULL
+      );
+
+      -- Curated BLS tables
+      INSERT INTO curated_bls_series (bls_series_id, source_id)
+      SELECT DISTINCT
+        bls_series_id,
+        1
+      FROM stg_bls;
+
+      INSERT INTO curated_labor_metric (metric_id, metric_name)
+      SELECT 1, 'labor_observation';
+
+      -- Facts
+      INSERT INTO fact_labor_observation (
+        bls_series_id,
+        observation_date,
+        metric_value
+      )
+      SELECT
+        bls_series_id,
+        PARSE_DATE('%Y-%m', REPLACE(time_period_code, 'M', '')) AS observation_date,
+        SAFE_CAST(value AS NUMERIC) AS metric_value
+      FROM stg_bls;
+
+      INSERT INTO fact_job_posting (
+        source_id,
+        occupation_id,
+        employer_id,
+        location_id,
+        posted_at,
+        source_record_id
+      )
+      SELECT
+        2 AS source_id,
+        o.occupation_id,
+        e.employer_id,
+        l.location_id,
+        s.posted_at,
+        s.source_record_id
+      FROM stg_usajobs s
+      LEFT JOIN dim_occupation o ON s.occupation_name = o.occupation_name
+      LEFT JOIN dim_employer e ON s.employer_name = e.employer_name
+      LEFT JOIN dim_location l ON s.location_name = l.location_name
+
+      UNION ALL
+
+      SELECT
+        3 AS source_id,
+        o.occupation_id,
+        e.employer_id,
+        l.location_id,
+        s.posted_at,
+        s.source_record_id
+      FROM stg_adzuna s
+      LEFT JOIN dim_occupation o ON s.occupation_name = o.occupation_name
+      LEFT JOIN dim_employer e ON s.employer_name = e.employer_name
+      LEFT JOIN dim_location l ON s.location_name = l.location_name;
+    SQL
+  }
+}
+
 # Configure our bigquery dataset for data transformation.
-resource "google_bigquery_dataset" "bq_dataset" {
+resource "google_bigquery_dataset" "employment_analytics" {
   dataset_id = var.bq_dataset_id
   location = var.region
   description = "Dataset used for loading into private database"
@@ -633,10 +1006,53 @@ resource "google_bigquery_dataset" "bq_dataset" {
   }
   access {
     role = "WRITER"
-    user_by_email = "sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
+    user_by_email = "sa-data-workflow@${var.project_id}.iam.gserviceaccount.com"
   }
   access {
     role = "OWNER"
     user_by_email = "sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
+  }
+}
+
+resource "google_bigquery_table" "raw_tables" {
+  for_each   = var.bq_traw_tables
+  project    = var.project_id
+  dataset_id = google_bigquery_dataset.employment_analytics.dataset_id
+  table_id   = each.key
+
+  deletion_protection = each.value.deletion_protection
+  labels              = var.common_labels
+
+  schema = each.value.schema_path != null ? file(each.value.schema_path) : null
+  clustering = length(each.value.clustering) > 0 ? each.value.clustering : null
+
+  dynamic "time_partitioning" {
+    for_each = each.value.time_partitioning != null ? [each.value.time_partitioning] : []
+    content {
+      type          = time_partitioning.value.type
+      field         = try(time_partitioning.value.field, null)
+      expiration_ms = try(time_partitioning.value.expiration_ms, null)
+    }
+  }
+}
+resource "google_bigquery_table" "transformed_tables" {
+  for_each   = var.bq_transformed_tables
+  project    = var.project_id
+  dataset_id = google_bigquery_dataset.employment_analytics.dataset_id
+  table_id   = each.key
+
+  deletion_protection = each.value.deletion_protection
+  labels              = var.common_labels
+
+  schema = each.value.schema_path != null ? file(each.value.schema_path) : null
+  clustering = length(each.value.clustering) > 0 ? each.value.clustering : null
+
+  dynamic "time_partitioning" {
+    for_each = each.value.time_partitioning != null ? [each.value.time_partitioning] : []
+    content {
+      type          = time_partitioning.value.type
+      field         = try(time_partitioning.value.field, null)
+      expiration_ms = try(time_partitioning.value.expiration_ms, null)
+    }
   }
 }
