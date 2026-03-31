@@ -159,6 +159,9 @@ variable "common_labels" {
   default = {}
 }
 
+variable db_user  {type = string}
+variable db_name  {type = string}
+
 variable "adzuna_app_id"  {type = string}
 variable "adzuna_key"     {type = string}
 variable "adzuna_country" {type = string}  
@@ -168,12 +171,14 @@ variable "bls_key" {type = string}
 variable "usajobs_user_email" {type = string}
 variable "usajobs_key" {type = string}
 
+variable "app_service_image" {type = string}
+variable "app_service_name" {type = string}
+
 variable "scraper_job_name" {type = string}
 variable "scraper_image" {type = string}
 
 variable "loader_job_name" {type = string}
 variable "loader_image" {type = string}
-variable "db_master_pwd" {type = string}
 
 variable "enable_cloudsql" {
   type    = bool
@@ -188,15 +193,19 @@ provider "google" {
 data "google_project" "current" {}
 
 locals {
-  sa_scraper   = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
-  sa_loader    = "serviceAccount:sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
-  sa_scheduler = "serviceAccount:sa-scheduler@${var.project_id}.iam.gserviceaccount.com"
-  sa_manager   = "serviceAccount:sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
+  sa_scraper             = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
+  sa_loader              = "serviceAccount:sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
+  sa_scheduler           = "serviceAccount:sa-scheduler@${var.project_id}.iam.gserviceaccount.com"
+  sa_manager             = "serviceAccount:sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
   sa_secret_manager      = "serviceAccount:sa-secret-manager@${var.project_id}.iam.gserviceaccount.com"
   sa_event_trigger       = "serviceAccount:sa-event-trigger@${var.project_id}.iam.gserviceaccount.com"
   sa_workflow            = "serviceAccount:sa-data-workflow@${var.project_id}.iam.gserviceaccount.com"
+  sa_app_account         = "serviceAccount:sa-app-account@${var.project_id}.iam.gserviceaccount.com"
+  sa_app_deployer        = "serviceAccount:sa-app-deployer@${var.project_id}.iam.gserviceaccount.com"
   sa_workflow_email      = "sa-data-workflow@${var.project_id}.iam.gserviceaccount.com"
   sa_event_trigger_email = "sa-event-trigger@${var.project_id}.iam.gserviceaccount.com"
+  sa_app_account_email   = "sa-app-account@${var.project_id}.iam.gserviceaccount.com" 
+  sa_app_deployer_email  = "sa-app-deployer@${var.project_id}.iam.gserviceaccount.com"
 }
 
 locals {
@@ -204,6 +213,13 @@ locals {
     BQ_PROJECT_ID = var.project_id
     BQ_DATASET_ID = var.bq_dataset_id
     BQ_LOAD_JOB_ID = var.bq_load_job_id
+  }
+}
+locals {
+  non_secret_sql_env = {
+    DB_NAME = var.db_name
+    DB_USER = var.db_user
+    INSTANCE_CONNECTION_NAME = google_sql_database_instance.private_db_instance.name
   }
 }
 
@@ -229,7 +245,9 @@ locals {
       "roles/run.admin",
       "roles/bigquery.dataOwner",
       "roles/storage.admin", 
-      "roles/workflows.admin"],
+      "roles/workflows.admin",
+      "roles/artifactregistry.admin"
+      ],
       var.enable_cloudsql ? ["roles/cloudsql.editor"] : []
     )
 
@@ -237,15 +255,24 @@ locals {
       "roles/secretmanager.secretAccessor",
       "roles/cloudkms.cryptoKeyEncrypterDecrypter"
     ]
+
     (local.sa_event_trigger) = [
       "roles/workflows.invoker",
       "roles/pubsub.publisher"
     ]
+
     (local.sa_workflow) = [
       "roles/logging.logWriter",
       "roles/bigquery.jobUser",
       "roles/bigquery.dataEditor"
     ]
+
+    (local.sa_app_account) = concat (
+      [
+      "roles/logging.logWriter",
+    ],
+    var.enable_cloudsql ? ["roles/cloudsql.client"] : []
+    )
   }
 
   project_iam_bindings = flatten([
@@ -270,6 +297,20 @@ resource "google_project_iam_member" "project_bindings" {
   member  = each.value.member
 }
 
+# Enable deployer agent to access the application agent
+resource "google_service_account_iam_member" "deployer_access_application_agent" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${local.sa_app_account_email}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = local.sa_app_deployer
+}
+
+# Enable the Secret Manager API. GCP creates the service agent when this is enabled.
+resource "google_project_service" "secretmanager" {
+  project            = var.project_id
+  service            = "secretmanager.googleapis.com"
+  disable_on_destroy = false
+}
+
 # Configure KMS keyring.
 resource "google_kms_key_ring" "secrets" {
   name     = "nazimz-keyring"
@@ -280,92 +321,124 @@ resource "google_kms_key_ring" "secrets" {
 resource "google_kms_crypto_key" "secrets" {
   name            = "nazimz-key"
   key_ring        = google_kms_key_ring.secrets.id
-  rotation_period = "7776000s" 
+  rotation_period = "7776000s"
 }
 
-# Grant Google Service Account encyrpt and decrypt access using our custom key. 
+# Provision the Secret Manager service agent (the Google-managed SA that GCP
+# creates automatically when the API is enabled). Using google_project_service_identity
+# ensures the agent exists in state and exposes its email as a reference — safer
+# than hard-coding the service-PROJECT_NUMBER@gcp-sa-secretmanager pattern.
+resource "google_project_service_identity" "secretmanager_agent" {
+  project    = var.project_id
+  service    = "secretmanager.googleapis.com"
+  depends_on = [google_project_service.secretmanager]
+}
+
+# Grant the Secret Manager service agent encrypt/decrypt rights on our CMEK key.
+# All google_secret_manager_secret resources must depend on this binding so that
+# GCP can wrap the DEK when a secret is first written.
 resource "google_kms_crypto_key_iam_member" "secretmanager_cmek" {
   crypto_key_id = google_kms_crypto_key.secrets.id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
-  member        = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-secretmanager.iam.gserviceaccount.com"
+  member        = "serviceAccount:${google_project_service_identity.secretmanager_agent.email}"
 }
 
 # Configure secret for API Key for BLS
 resource "google_secret_manager_secret" "bls_api_key" {
   project   = var.project_id
   secret_id = "BLS_API_KEY"
-  replication { 
+  replication {
     auto {
       customer_managed_encryption {
         kms_key_name = google_kms_crypto_key.secrets.id
       }
-    } 
+    }
   }
+  depends_on = [google_kms_crypto_key_iam_member.secretmanager_cmek]
 }
 
 # Configure secret for user credentials for USAjobs
 resource "google_secret_manager_secret" "usajobs_user_email" {
   project   = var.project_id
   secret_id = "USAJOBS_EMAIL"
-  replication { 
+  replication {
     auto {
       customer_managed_encryption {
         kms_key_name = google_kms_crypto_key.secrets.id
       }
-    } 
+    }
   }
+  depends_on = [google_kms_crypto_key_iam_member.secretmanager_cmek]
 }
 
 # Configure secret for API Key received from USAJobs
 resource "google_secret_manager_secret" "usajobs_api_key" {
   project   = var.project_id
   secret_id = "USAJOBS_API_KEY"
-  replication { 
+  replication {
     auto {
       customer_managed_encryption {
         kms_key_name = google_kms_crypto_key.secrets.id
       }
-    } 
+    }
   }
+  depends_on = [google_kms_crypto_key_iam_member.secretmanager_cmek]
 }
 
 # Configure secret for App ID received from Adzuna
 resource "google_secret_manager_secret" "adzuna_app_id" {
   project   = var.project_id
   secret_id = "ADZUNA_APP_ID"
-  replication { 
+  replication {
     auto {
       customer_managed_encryption {
         kms_key_name = google_kms_crypto_key.secrets.id
       }
-    } 
+    }
   }
+  depends_on = [google_kms_crypto_key_iam_member.secretmanager_cmek]
 }
 
 # Configure secret for API Key received from Adzuna
 resource "google_secret_manager_secret" "adzuna_api_key" {
   project   = var.project_id
   secret_id = "ADZUNA_API_KEY"
-  replication { 
+  replication {
     auto {
       customer_managed_encryption {
         kms_key_name = google_kms_crypto_key.secrets.id
       }
-    } 
+    }
   }
+  depends_on = [google_kms_crypto_key_iam_member.secretmanager_cmek]
 }
 
 # Configure secret for bigquery password.
 resource "google_secret_manager_secret" "db_master_pwd" {
   project   = var.project_id
   secret_id = "DB_MASTER_PWD"
-  replication { 
+  replication {
     auto {
       customer_managed_encryption {
         kms_key_name = google_kms_crypto_key.secrets.id
       }
-    } 
+    }
   }
+  depends_on = [google_kms_crypto_key_iam_member.secretmanager_cmek]
+}
+
+# Configure secret for sql database password.
+resource "google_secret_manager_secret" "db_private_pwd" {
+  project   = var.project_id
+  secret_id = "DB_PASSWORD"
+  replication {
+    auto {
+      customer_managed_encryption {
+        kms_key_name = google_kms_crypto_key.secrets.id
+      }
+    }
+  }
+  depends_on = [google_kms_crypto_key_iam_member.secretmanager_cmek]
 }
 
 # Role for scraper to write data to our cloud storage bucket.
@@ -523,6 +596,31 @@ resource "google_service_networking_connection" "private_vpc_connection" {
   depends_on = [google_project_service.service_networking]
 }
 
+# Enable access to SQL database password.
+resource "google_secret_manager_secret_iam_member" "database_accessor" {
+  secret_id = google_secret_manager_secret.db_private_pwd.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = local.sa_app_account
+}
+
+# Create user for the SQL database
+resource "google_sql_user" "users" {
+  name     = var.db_user
+  instance = google_sql_database_instance.private_db_instance.name
+  password = google_secret_manager_secret.db_private_pwd.secret_id
+}
+
+
+# CRITICAL: Removed the deny-all-egress firewall rule as it prevents Cloud SQL from functioning
+# Cloud SQL requires egress connectivity for replication, backups, and Google API access
+# Instead, rely on VPC design and Cloud SQL being private-only (no public IP)
+
+# Configure the private database to host our cloud sql instance.
+resource "google_sql_database" "database" {
+  name     = "nazimz-private-sql-db"
+  instance = google_sql_database_instance.private_db_instance.name
+}
+
 # Configure the private cloud sql database within the private subnet.
 resource "google_sql_database_instance" "private_db_instance" {
   name = "nazimz-private-sql-instance"
@@ -539,6 +637,83 @@ resource "google_sql_database_instance" "private_db_instance" {
   depends_on = [google_service_networking_connection.private_vpc_connection]
 }
 
+# Configure the service to host the streamlit application.
+resource "google_cloud_run_v2_service" "streamlit-app" {
+  name     = var.app_service_name
+  location = var.region
+
+  template {
+    containers {
+      image = var.app_service_image
+      dynamic "env" {
+          for_each = local.non_secret_db_env
+          content {
+            name = env.key
+            value = env.value
+          }
+        }
+      env {
+        name = "DB_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret = google_secret_manager_secret.db_private_pwd.secret_id
+            version = "latest"
+          }
+        }
+      }
+      ports {
+        container_port = 8080
+      }
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+      }
+    }
+  }
+}
+
+# Enable Artifact Registry API
+resource "google_project_service" "artifactregistry" {
+  project = var.project_id
+  service = "artifactregistry.googleapis.com"
+  disable_on_destroy = false
+}
+
+# Create Artifact Registry for docker image to host streamlit app
+resource "google_artifact_registry_repository" "streamlit_repo {
+  location      =  var.region
+  repository_id = "streamlit-docker-img"
+  description   = "Docker image repository for streamlit app."
+  format        = "DOCKER"
+  
+  # Optional: prevent tag overwrites in production
+  docker_config {
+    immutable_tags = true
+  }
+
+  depends_on = [google_project_service.artifactregistry]
+}
+
+# Enable deployer agent to write docker image to streamlit repo
+resource "google_artifact_registry_repository_iam_member" "viewer" {
+  project    = var.project_id
+  location   = var.region
+  repository = google_artifact_registry_repository.streamlit_repo.name
+  role       = "roles/artifactregistry.writer"
+  member     = sa.sa_app_deployer
+}
+
+# Enable deployer agent to run the Cloud Run service for streamlit app
+resource "google_cloud_run_v2_service_iam_member" "deployer_runs_service" {
+  project  = var.project_id
+  location = var.region
+  name     = var.app_service_name
+  role   = "roles/run.developer"
+  member = local.sa_app_deployer
+}
+
 # Configure firewall rule that only accepts inbound traffic from connector subnet.
 resource "google_compute_firewall" "enable_traffic_to_db" {
   name = "enable-traffic-to-db"
@@ -552,16 +727,6 @@ resource "google_compute_firewall" "enable_traffic_to_db" {
     protocol = "tcp"
     ports = ["3306"]
   }
-}
-
-# CRITICAL: Removed the deny-all-egress firewall rule as it prevents Cloud SQL from functioning
-# Cloud SQL requires egress connectivity for replication, backups, and Google API access
-# Instead, rely on VPC design and Cloud SQL being private-only (no public IP)
-
-# Configure the private database to host our cloud sql instance.
-resource "google_sql_database" "database" {
-  name     = "nazimz-private-sql-db"
-  instance = google_sql_database_instance.private_db_instance.name
 }
 
 # Configure the Cloud Run job to scrape data from the Internet.

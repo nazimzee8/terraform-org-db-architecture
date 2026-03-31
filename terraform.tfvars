@@ -110,9 +110,14 @@ bq_transformed_tables = {
     }
   }
 }
-scraper_job_name      = "hourly-scraper-job"
+
+db_name = "nazimz-private-sql-db"
+db_user = "nazimz"
+app_service_image     = ""
+app_service_name      = "streamlit-app-service"
+scraper_job_name      = "monthly-scraper-job"
 scraper_image         = ""
-loader_job_name       = "hourly-loader-job" 
+loader_job_name       = "monthly-loader-job" 
 loader_image          = ""
 adzuna_country        = "us"
 enable_cloudsql       = true

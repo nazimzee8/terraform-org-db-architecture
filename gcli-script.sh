@@ -28,6 +28,14 @@ gcloud iam service-accounts create sa-data-workflow \
 	--display-name="Data Workflow Service Account" \
 	--description="Service account used for managing the data workflow for this ETL pipeline."
 
+gcloud iam service-accounts create sa-app-account \
+	--display-name="Application Account Service Account" \
+	--description="Service account used for managing the streamlit app for this infrastructure."
+
+gcloud iam service-accounts create sa-app-deployer \
+	--display-name="Application Deployer Service Account" \
+	--description="Service account used for deploying the service container hosting the streamlit app for this infrastructure."
+
 gcloud projects get-iam-policy nazimz-database --format=json > policy.json
 
 gcloud projects set-iam-policy nazimz-database policy.json
