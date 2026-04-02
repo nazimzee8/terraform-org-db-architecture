@@ -4,6 +4,10 @@ terraform {
       source  = "hashicorp/google"
       version = "6.7.0"
     }
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "6.7.0"
+    }
   }
 }
 
@@ -196,6 +200,11 @@ provider "google" {
   region  = var.region
 }
 
+provider "google-beta" {
+  project = var.project_id
+  region  = var.region
+}
+
 data "google_project" "current" {}
 
 locals {
@@ -342,6 +351,7 @@ resource "google_kms_crypto_key" "secrets" {
 # ensures the agent exists in state and exposes its email as a reference — safer
 # than hard-coding the service-PROJECT_NUMBER@gcp-sa-secretmanager pattern.
 resource "google_project_service_identity" "secretmanager_agent" {
+  provider   = google-beta
   project    = var.project_id
   service    = "secretmanager.googleapis.com"
   depends_on = [google_project_service.secretmanager]
@@ -963,6 +973,7 @@ resource "google_storage_bucket_iam_member" "event_bucket_retrieval" {
 }
 
 resource "google_workflows_workflow" "etl_workflow" {
+  provider            = google-beta
   name                = var.workflow_name
   region              = var.region
   description         = "GCS -> BigQuery raw load -> BigQuery transform -> Cloud Run loader -> Cloud SQL"
