@@ -169,14 +169,9 @@ variable "common_labels" {
 variable db_user  {type = string}
 variable db_name  {type = string}
 
-variable "adzuna_app_id"  {type = string}
-variable "adzuna_key"     {type = string}
 variable "adzuna_country" {type = string}  
 
-variable "bls_key" {type = string}
 
-variable "usajobs_user_email" {type = string}
-variable "usajobs_key" {type = string}
 
 variable "app_service_image" {type = string}
 variable "app_service_name" {type = string}
@@ -231,13 +226,6 @@ locals {
     BQ_DATASET_ID = var.bq_dataset_id
   }
 }
-locals {
-  non_secret_sql_env = {
-    DB_NAME = var.db_name
-    DB_USER = var.db_user
-    INSTANCE_CONNECTION_NAME = google_sql_database_instance.private_db_instance.name
-  }
-}
 
 locals {
   project_roles_by_member = {
@@ -283,12 +271,10 @@ locals {
       "roles/bigquery.dataEditor"
     ]
 
-    (local.sa_app_account) = concat (
-      [
+    (local.sa_app_account) = [
       "roles/logging.logWriter",
-    ],
-    var.enable_cloudsql ? ["roles/cloudsql.client"] : []
-    )
+      "roles/bigquery.jobUser"
+    ]
 
     (local.sa_cloudbuild) = [
       "roles/artifactregistry.writer",
@@ -326,6 +312,13 @@ resource "google_service_account_iam_member" "deployer_access_application_agent"
   member             = local.sa_app_deployer
 }
 
+resource "google_service_account_iam_member" "cloudbuild_access_application_agent" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${local.sa_app_account_email}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = local.sa_cloudbuild
+}
+
+
 # Enable the Secret Manager API. GCP creates the service agent when this is enabled.
 resource "google_project_service" "secretmanager" {
   project            = var.project_id
@@ -348,7 +341,7 @@ resource "google_kms_crypto_key" "secrets" {
 
 # Provision the Secret Manager service agent (the Google-managed SA that GCP
 # creates automatically when the API is enabled). Using google_project_service_identity
-# ensures the agent exists in state and exposes its email as a reference — safer
+# ensures the agent exists in state and exposes its email as a reference - safer
 # than hard-coding the service-PROJECT_NUMBER@gcp-sa-secretmanager pattern.
 resource "google_project_service_identity" "secretmanager_agent" {
   provider   = google-beta
@@ -649,18 +642,18 @@ resource "google_service_networking_connection" "private_vpc_connection" {
   depends_on = [google_project_service.service_networking]
 }
 
-# Enable access to SQL database password.
-resource "google_secret_manager_secret_iam_member" "database_accessor" {
-  secret_id = google_secret_manager_secret.db_private_pwd.secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = local.sa_app_account
+data "google_secret_manager_secret_version_access" "db_password" {
+  project = var.project_id
+  secret  = google_secret_manager_secret.db_private_pwd.secret_id
+  version = "latest"
 }
+
 
 # Create user for the SQL database
 resource "google_sql_user" "users" {
   name     = var.db_user
   instance = google_sql_database_instance.private_db_instance.name
-  password = google_secret_manager_secret.db_private_pwd.secret_id
+  password = data.google_secret_manager_secret_version_access.db_password.secret_data
 }
 
 
@@ -697,6 +690,7 @@ resource "google_cloud_run_v2_service" "streamlit-app" {
 
   template {
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
+    service_account       = local.sa_app_account_email
 
     scaling {
       min_instance_count = 1
@@ -706,19 +700,10 @@ resource "google_cloud_run_v2_service" "streamlit-app" {
       image = var.app_service_image
 
       dynamic "env" {
-        for_each = local.non_secret_sql_env
+        for_each = local.non_secret_bq_env
         content {
           name  = env.key
           value = env.value
-        }
-      }
-      env {
-        name = "DB_PASSWORD"
-        value_source {
-          secret_key_ref {
-            secret  = google_secret_manager_secret.db_private_pwd.secret_id
-            version = "latest"
-          }
         }
       }
       ports {
@@ -1176,6 +1161,14 @@ resource "google_bigquery_dataset_iam_member" "workflow_dataset_user" {
   member     = local.sa_workflow
 }
 
+resource "google_bigquery_dataset_iam_member" "app_dataset_viewer" {
+  project    = var.project_id
+  dataset_id = var.bq_dataset_id
+  role       = "roles/bigquery.dataViewer"
+  member     = local.sa_app_account
+}
+
+
 
 # Configure the cloud storage bucket for our scraper job to send the data to.
 resource "google_storage_bucket" "ingestion_bucket" {
@@ -1552,7 +1545,7 @@ resource "google_bigquery_routine" "sp_transform_adzuna" {
   depends_on = [google_bigquery_table.transformed_tables]
 }
 
-# ── Cloud Build Triggers ───────────────────────────────────────────────────
+# Cloud Build Triggers
 
 resource "google_cloudbuild_trigger" "scraper_trigger" {
   name     = "scraper-build-deploy"
