@@ -6,7 +6,7 @@ steps:
       - build
       - '--no-cache'
       - '-t'
-      - '$_IMAGE_URI:$SHORT_SHA'
+      - '$_IMAGE_URI:${_TAG}'
       - '-t'
       - '$_IMAGE_URI:latest'
       - '-f'
@@ -29,7 +29,7 @@ steps:
       - services
       - update
       - 'streamlit-app-service'
-      - '--image=$_IMAGE_URI:$SHORT_SHA'
+      - '--image=$_IMAGE_URI:${_TAG}'
       - '--region=$_REGION'
       - '--min-instances=1'
       - '--cpu-boost'
@@ -37,6 +37,7 @@ steps:
     waitFor: ['push']
 
 substitutions:
+  _TAG: 'latest'
   _IMAGE_URI: 'us-west2-docker.pkg.dev/nazimz-database/streamlit-docker-img/streamlit'
   _REGION: 'us-west2'
 

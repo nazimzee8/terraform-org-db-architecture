@@ -6,7 +6,7 @@ steps:
       - build
       - '--no-cache'
       - '-t'
-      - '$_IMAGE_URI:$SHORT_SHA'
+      - '$_IMAGE_URI:${_TAG}'
       - '-t'
       - '$_IMAGE_URI:latest'
       - '-f'
@@ -29,11 +29,12 @@ steps:
       - jobs
       - update
       - 'monthly-loader-job'
-      - '--image=$_IMAGE_URI:$SHORT_SHA'
+      - '--image=$_IMAGE_URI:${_TAG}'
       - '--region=$_REGION'
     waitFor: ['push']
 
 substitutions:
+  _TAG: 'latest'
   _IMAGE_URI: 'us-west2-docker.pkg.dev/nazimz-database/loader-docker-img/loader'
   _REGION: 'us-west2'
 
