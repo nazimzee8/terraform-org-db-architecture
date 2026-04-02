@@ -6,6 +6,7 @@
   { "name": "occupation_id",             "type": "STRING", "mode": "NULLABLE" },
   { "name": "location_id",              "type": "STRING", "mode": "NULLABLE" },
   { "name": "seasonal_adjustment_flag",  "type": "BOOL",   "mode": "NULLABLE" },
+  { "name": "supersector_code",          "type": "STRING", "mode": "NULLABLE" },
   { "name": "area_type",                 "type": "STRING", "mode": "NULLABLE" },
   { "name": "notes",                     "type": "STRING", "mode": "NULLABLE" }
 ]

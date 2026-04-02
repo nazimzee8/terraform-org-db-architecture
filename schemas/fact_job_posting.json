@@ -19,5 +19,7 @@
   { "name": "salary_interval",             "type": "STRING",    "mode": "NULLABLE" },
   { "name": "required_experience_level",   "type": "STRING",    "mode": "NULLABLE" },
   { "name": "source_status",               "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "security_clearance_required", "type": "BOOL",      "mode": "NULLABLE" },
+  { "name": "work_schedule",               "type": "STRING",    "mode": "NULLABLE" },
   { "name": "posted_date",                 "type": "DATE",      "mode": "NULLABLE" }
 ]

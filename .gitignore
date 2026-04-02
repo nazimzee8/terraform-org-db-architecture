@@ -1,0 +1,42 @@
+# Terraform state and lock files
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Secrets / environment
+.env
+.env.*
+secrets/
+*.pem
+*.key
+service-account*.json
+credentials*.json
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Docker build leftovers
+.dockerignore
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

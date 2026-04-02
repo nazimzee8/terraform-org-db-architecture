@@ -1,0 +1,45 @@
+steps:
+  # Step 1 — Build multi-stage image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build
+    args:
+      - build
+      - '--no-cache'
+      - '-t'
+      - '$_IMAGE_URI:$SHORT_SHA'
+      - '-t'
+      - '$_IMAGE_URI:latest'
+      - '-f'
+      - 'streamlit/Dockerfile'
+      - 'streamlit'
+    waitFor: ['-']
+
+  # Step 2 — Push both tags
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push
+    args: ['push', '--all-tags', '$_IMAGE_URI']
+    waitFor: ['build']
+
+  # Step 3 — Update Cloud Run service image with cold-start flags
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - 'streamlit-app-service'
+      - '--image=$_IMAGE_URI:$SHORT_SHA'
+      - '--region=$_REGION'
+      - '--min-instances=1'
+      - '--cpu-boost'
+      - '--no-cpu-throttling'
+    waitFor: ['push']
+
+substitutions:
+  _IMAGE_URI: 'us-west2-docker.pkg.dev/nazimz-database/streamlit-docker-img/streamlit'
+  _REGION: 'us-west2'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8

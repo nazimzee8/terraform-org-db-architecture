@@ -10,7 +10,10 @@ terraform {
 variable "project_id" {type = string}
 variable "region" {type = string}
 
-variable "keywords" {type = string}
+variable "keywords" {
+  type    = string
+  default = ""
+}
 variable "keywords_list" {
   type = list(string)
   default = [
@@ -185,6 +188,9 @@ variable "enable_cloudsql" {
   default = true
 }
 
+variable "github_owner" { type = string }
+variable "github_repo"  { type = string }
+
 provider "google" {
   project = var.project_id
   region  = var.region
@@ -206,13 +212,14 @@ locals {
   sa_event_trigger_email = "sa-event-trigger@${var.project_id}.iam.gserviceaccount.com"
   sa_app_account_email   = "sa-app-account@${var.project_id}.iam.gserviceaccount.com" 
   sa_app_deployer_email  = "sa-app-deployer@${var.project_id}.iam.gserviceaccount.com"
+  sa_scheduler_email     = "sa-scheduler@${var.project_id}.iam.gserviceaccount.com"
+  sa_cloudbuild          = "serviceAccount:${data.google_project.current.number}@cloudbuild.gserviceaccount.com"
 }
 
 locals {
   non_secret_bq_env = {
     BQ_PROJECT_ID = var.project_id
     BQ_DATASET_ID = var.bq_dataset_id
-    BQ_LOAD_JOB_ID = var.bq_load_job_id
   }
 }
 locals {
@@ -273,6 +280,12 @@ locals {
     ],
     var.enable_cloudsql ? ["roles/cloudsql.client"] : []
     )
+
+    (local.sa_cloudbuild) = [
+      "roles/artifactregistry.writer",
+      "roles/run.developer",
+      "roles/logging.logWriter",
+    ]
   }
 
   project_iam_bindings = flatten([
@@ -516,6 +529,36 @@ resource "google_cloud_run_v2_job_iam_member" "scheduler_invokes_scraper" {
   member = local.sa_scheduler
 }
 
+# Enable Cloud Scheduler API
+resource "google_project_service" "cloudscheduler" {
+  project            = var.project_id
+  service            = "cloudscheduler.googleapis.com"
+  disable_on_destroy = false
+}
+
+# Monthly trigger: fires on the 1st of every month at 06:00 ET
+resource "google_cloud_scheduler_job" "monthly_scraper_trigger" {
+  name             = "monthly-scraper-trigger"
+  region           = var.region
+  description      = "Invokes the scraper Cloud Run job on the 1st of every month at 06:00 ET"
+  schedule         = "0 6 1 * *"
+  time_zone        = "America/New_York"
+  attempt_deadline = "320s"
+
+  http_target {
+    http_method = "POST"
+    uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/${var.scraper_job_name}:run"
+    oauth_token {
+      service_account_email = local.sa_scheduler_email
+    }
+  }
+
+  depends_on = [
+    google_project_service.cloudscheduler,
+    google_cloud_run_v2_job_iam_member.scheduler_invokes_scraper
+  ]
+}
+
 # Creating the VPC network to host our public and private subnets.
 resource "google_compute_network" "vpc_network" {
   name = "nazimz-db-network"
@@ -643,20 +686,27 @@ resource "google_cloud_run_v2_service" "streamlit-app" {
   location = var.region
 
   template {
+    execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
+
+    scaling {
+      min_instance_count = 1
+    }
+
     containers {
       image = var.app_service_image
+
       dynamic "env" {
-          for_each = local.non_secret_db_env
-          content {
-            name = env.key
-            value = env.value
-          }
+        for_each = local.non_secret_sql_env
+        content {
+          name  = env.key
+          value = env.value
         }
+      }
       env {
         name = "DB_PASSWORD"
         value_source {
           secret_key_ref {
-            secret = google_secret_manager_secret.db_private_pwd.secret_id
+            secret  = google_secret_manager_secret.db_private_pwd.secret_id
             version = "latest"
           }
         }
@@ -669,20 +719,60 @@ resource "google_cloud_run_v2_service" "streamlit-app" {
           cpu    = "1"
           memory = "512Mi"
         }
+        cpu_idle          = false
+        startup_cpu_boost = true
+      }
+      startup_probe {
+        http_get {
+          path = "/_stcore/health"
+        }
+        initial_delay_seconds = 10
+        timeout_seconds       = 5
+        period_seconds        = 10
+        failure_threshold     = 3
       }
     }
+  }
+
+  lifecycle {
+    ignore_changes = [template[0].containers[0].image]
   }
 }
 
 # Enable Artifact Registry API
 resource "google_project_service" "artifactregistry" {
-  project = var.project_id
-  service = "artifactregistry.googleapis.com"
+  project            = var.project_id
+  service            = "artifactregistry.googleapis.com"
   disable_on_destroy = false
 }
 
+# Enable Cloud Build API
+resource "google_project_service" "cloudbuild" {
+  project            = var.project_id
+  service            = "cloudbuild.googleapis.com"
+  disable_on_destroy = false
+}
+
+# Create Artifact Registry for docker image for scraper job
+resource "google_artifact_registry_repository" "scraper_repo" {
+  location      = var.region
+  repository_id = "scraper-docker-img"
+  description   = "Docker image repository for scraper Cloud Run job."
+  format        = "DOCKER"
+  depends_on    = [google_project_service.artifactregistry]
+}
+
+# Create Artifact Registry for docker image for loader job
+resource "google_artifact_registry_repository" "loader_repo" {
+  location      = var.region
+  repository_id = "loader-docker-img"
+  description   = "Docker image repository for loader Cloud Run job."
+  format        = "DOCKER"
+  depends_on    = [google_project_service.artifactregistry]
+}
+
 # Create Artifact Registry for docker image to host streamlit app
-resource "google_artifact_registry_repository" "streamlit_repo {
+resource "google_artifact_registry_repository" "streamlit_repo" {
   location      =  var.region
   repository_id = "streamlit-docker-img"
   description   = "Docker image repository for streamlit app."
@@ -702,7 +792,7 @@ resource "google_artifact_registry_repository_iam_member" "viewer" {
   location   = var.region
   repository = google_artifact_registry_repository.streamlit_repo.name
   role       = "roles/artifactregistry.writer"
-  member     = sa.sa_app_deployer
+  member     = local.sa_app_deployer
 }
 
 # Enable deployer agent to run the Cloud Run service for streamlit app
@@ -803,6 +893,14 @@ resource "google_cloud_run_v2_job" "scraper_job" {
           name = "INGESTION_BUCKET"
           value = google_storage_bucket.ingestion_bucket.name
         }
+        env {
+          name  = "ADZUNA_COUNTRY"
+          value = var.adzuna_country
+        }
+        env {
+          name  = "KEYWORDS"
+          value = join(",", var.keywords_list)
+        }
         volume_mounts {
           name = "gcs-volume"
           mount_path = "/gcs"
@@ -818,6 +916,10 @@ resource "google_cloud_run_v2_job" "scraper_job" {
     }
   }
   depends_on = [google_storage_bucket_iam_member.scraper_bucket_writer]
+
+  lifecycle {
+    ignore_changes = [template[0].template[0].containers[0].image]
+  }
 }
 
 # Enable eventarc API. 
@@ -1091,24 +1193,24 @@ resource "google_cloud_run_v2_job" "loader_job" {
       containers {
         image = var.loader_image
         env {
-          name = "BQ_PROJECT_ID" 
+          name = "BQ_PROJECT_ID"
           value = var.project_id
         }
-        env { 
-          name = "BQ_DATASET_ID" 
-          value = var.bq_dataset_id 
+        env {
+          name = "BQ_DATASET_ID"
+          value = var.bq_dataset_id
         }
         env {
-          name = "DB_HOST" 
-          value = google_sql_database_instance.private_db_instance.private_ip_address 
+          name = "DB_HOST"
+          value = google_sql_database_instance.private_db_instance.private_ip_address
         }
-        env { 
-          name = "DB_NAME" 
-          value = "jobs_db" 
+        env {
+          name = "DB_NAME"
+          value = var.db_name
         }
-        env { 
-          name = "DB_USER" 
-          value = "loader_user" 
+        env {
+          name = "DB_USER"
+          value = var.db_user
         }
         env {
           name = "DB_PASSWORD"
@@ -1121,6 +1223,10 @@ resource "google_cloud_run_v2_job" "loader_job" {
         }
       }
     }
+  }
+
+  lifecycle {
+    ignore_changes = [template[0].template[0].containers[0].image]
   }
 }
 
@@ -1199,23 +1305,85 @@ resource "google_bigquery_routine" "sp_transform_bls" {
   language     = "SQL"
   definition_body = <<-SQL
     BEGIN
-      -- Populate dim_time_period from raw_bls_observation
+      -- 1. Populate dim_source_system
+      MERGE `${var.project_id}.${var.bq_dataset_id}.dim_source_system` T
+      USING (SELECT 'bls' AS source_id, 'Bureau of Labor Statistics' AS source_name) S
+      ON T.source_id = S.source_id
+      WHEN NOT MATCHED THEN INSERT (source_id, source_name) VALUES (S.source_id, S.source_name);
+
+      -- 2. Populate curated_labor_metric from series metadata
+      MERGE `${var.project_id}.${var.bq_dataset_id}.curated_labor_metric` T
+      USING (
+        SELECT DISTINCT
+          CASE WHEN source_series_key LIKE 'LN%' THEN 'unemployment_rate'
+               WHEN source_series_key LIKE 'CES%' THEN 'nonfarm_employment'
+               ELSE 'other' END AS metric_id,
+          CASE WHEN source_series_key LIKE 'LN%' THEN 'Unemployment Rate'
+               WHEN source_series_key LIKE 'CES%' THEN 'Nonfarm Employment Level'
+               ELSE 'Other' END AS metric_name,
+          CASE WHEN source_series_key LIKE 'LN%' THEN 'Percent'
+               WHEN source_series_key LIKE 'CES%' THEN 'Thousands of Persons'
+               ELSE NULL END AS unit_of_measure,
+          CASE WHEN source_series_key LIKE 'LN%' THEN 'UNEMPLOYMENT_RATE'
+               WHEN source_series_key LIKE 'CES%' THEN 'EMPLOYMENT_LEVEL'
+               ELSE NULL END AS metric_category
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_bls_observation`
+      ) S ON T.metric_id = S.metric_id
+      WHEN NOT MATCHED THEN INSERT (metric_id, metric_name, unit_of_measure, metric_category)
+        VALUES (S.metric_id, S.metric_name, S.unit_of_measure, S.metric_category);
+
+      -- 3. Populate dim_time_period
       MERGE `${var.project_id}.${var.bq_dataset_id}.dim_time_period` T
       USING (
         SELECT DISTINCT
           CONCAT(CAST(observation_year AS STRING), '-', observation_period) AS time_id,
           DATE(observation_year, CAST(SUBSTR(observation_period, 2) AS INT64), 1) AS calendar_date,
           observation_year AS year,
-          CAST(SUBSTR(observation_period, 2) AS INT64) AS month
+          CAST(SUBSTR(observation_period, 2) AS INT64) AS month,
+          'MONTH' AS period_type
         FROM `${var.project_id}.${var.bq_dataset_id}.raw_bls_observation`
         WHERE observation_period LIKE 'M%'
       ) S ON T.time_id = S.time_id
       WHEN NOT MATCHED THEN
         INSERT (time_id, calendar_date, year, month, period_type)
-        VALUES (S.time_id, S.calendar_date, S.year, S.month, 'MONTH');
+        VALUES (S.time_id, S.calendar_date, S.year, S.month, S.period_type);
 
-      -- Populate curated_bls_series and fact_labor_observation
-      -- (full mapping to be completed with Python scraper field names)
+      -- 4. Populate curated_bls_series
+      MERGE `${var.project_id}.${var.bq_dataset_id}.curated_bls_series` T
+      USING (
+        SELECT DISTINCT
+          source_series_key AS bls_series_id,
+          source_series_key,
+          CASE WHEN source_series_key LIKE 'LN%' THEN 'unemployment_rate'
+               WHEN source_series_key LIKE 'CES%' THEN 'nonfarm_employment'
+               ELSE 'other' END AS metric_id,
+          SUBSTR(source_series_key, 4, 2) AS supersector_code,
+          CASE WHEN source_series_key LIKE 'LNS%' THEN TRUE ELSE FALSE END AS seasonal_adjustment_flag
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_bls_observation`
+      ) S ON T.bls_series_id = S.bls_series_id
+      WHEN NOT MATCHED THEN
+        INSERT (bls_series_id, source_series_key, metric_id, supersector_code, seasonal_adjustment_flag)
+        VALUES (S.bls_series_id, S.source_series_key, S.metric_id, S.supersector_code, S.seasonal_adjustment_flag);
+
+      -- 5. Populate fact_labor_observation
+      MERGE `${var.project_id}.${var.bq_dataset_id}.fact_labor_observation` T
+      USING (
+        SELECT
+          GENERATE_UUID() AS labor_observation_id,
+          r.source_series_key AS bls_series_id,
+          CONCAT(CAST(r.observation_year AS STRING), '-', r.observation_period) AS time_id,
+          'bls' AS source_id,
+          CASE WHEN r.source_series_key LIKE 'LN%' THEN 'unemployment_rate'
+               WHEN r.source_series_key LIKE 'CES%' THEN 'nonfarm_employment'
+               ELSE 'other' END AS metric_id,
+          r.observation_value,
+          DATE(r.observation_year, CAST(SUBSTR(r.observation_period, 2) AS INT64), 1) AS observation_date
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_bls_observation` r
+        WHERE r.observation_period LIKE 'M%'
+      ) S ON T.bls_series_id = S.bls_series_id AND T.time_id = S.time_id
+      WHEN NOT MATCHED THEN
+        INSERT (labor_observation_id, bls_series_id, time_id, source_id, metric_id, observation_value, observation_date)
+        VALUES (S.labor_observation_id, S.bls_series_id, S.time_id, S.source_id, S.metric_id, S.observation_value, S.observation_date);
     END
   SQL
   depends_on = [google_bigquery_table.transformed_tables]
@@ -1228,10 +1396,73 @@ resource "google_bigquery_routine" "sp_transform_usajobs" {
   language     = "SQL"
   definition_body = <<-SQL
     BEGIN
-      -- Populate dim_employer, dim_occupation, dim_location from raw_usajobs_posting
-      -- Populate fact_job_posting
-      -- (full mapping to be completed with Python scraper field names)
-      SELECT 1;
+      -- 1. Populate dim_source_system
+      MERGE `${var.project_id}.${var.bq_dataset_id}.dim_source_system` T
+      USING (SELECT 'usajobs' AS source_id, 'USAJobs' AS source_name) S
+      ON T.source_id = S.source_id
+      WHEN NOT MATCHED THEN INSERT (source_id, source_name) VALUES (S.source_id, S.source_name);
+
+      -- 2. Populate dim_employer from USAJobs raw_payload
+      MERGE `${var.project_id}.${var.bq_dataset_id}.dim_employer` T
+      USING (
+        SELECT DISTINCT
+          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.OrganizationName'))) AS employer_id,
+          JSON_VALUE(raw_payload, '$.OrganizationName') AS employer_name,
+          'federal' AS employer_type
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_usajobs_posting`
+        WHERE JSON_VALUE(raw_payload, '$.OrganizationName') IS NOT NULL
+      ) S ON T.employer_id = S.employer_id
+      WHEN NOT MATCHED THEN INSERT (employer_id, employer_name, employer_type)
+        VALUES (S.employer_id, S.employer_name, S.employer_type);
+
+      -- 3. Populate dim_location from USAJobs raw_payload
+      MERGE `${var.project_id}.${var.bq_dataset_id}.dim_location` T
+      USING (
+        SELECT DISTINCT
+          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.PositionLocation[0].LocationName'))) AS location_id,
+          JSON_VALUE(raw_payload, '$.PositionLocation[0].CountryCode') AS country_code,
+          JSON_VALUE(raw_payload, '$.PositionLocation[0].CountrySubDivisionCode') AS state_code,
+          JSON_VALUE(raw_payload, '$.PositionLocation[0].LocationName') AS city_name
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_usajobs_posting`
+        WHERE JSON_VALUE(raw_payload, '$.PositionLocation[0].LocationName') IS NOT NULL
+      ) S ON T.location_id = S.location_id
+      WHEN NOT MATCHED THEN INSERT (location_id, country_code, state_code, city_name)
+        VALUES (S.location_id, S.country_code, S.state_code, S.city_name);
+
+      -- 4. Populate fact_job_posting from USAJobs raw_payload
+      MERGE `${var.project_id}.${var.bq_dataset_id}.fact_job_posting` T
+      USING (
+        SELECT
+          GENERATE_UUID() AS job_posting_id,
+          source_id,
+          source_posting_key,
+          JSON_VALUE(raw_payload, '$.PositionURI') AS posting_url,
+          JSON_VALUE(raw_payload, '$.PositionTitle') AS job_title,
+          JSON_VALUE(raw_payload, '$.QualificationSummary') AS job_description,
+          JSON_VALUE(raw_payload, '$.PositionSchedule[0].Name') AS work_schedule,
+          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.OrganizationName'))) AS employer_id,
+          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.PositionLocation[0].LocationName'))) AS location_id,
+          SAFE_CAST(JSON_VALUE(raw_payload, '$.PositionRemuneration[0].MinimumRange') AS NUMERIC) AS salary_min,
+          SAFE_CAST(JSON_VALUE(raw_payload, '$.PositionRemuneration[0].MaximumRange') AS NUMERIC) AS salary_max,
+          JSON_VALUE(raw_payload, '$.PositionRemuneration[0].CurrencyCode') AS salary_currency,
+          JSON_VALUE(raw_payload, '$.PositionRemuneration[0].RateIntervalCode') AS salary_interval,
+          CASE
+            WHEN JSON_VALUE(raw_payload, '$.UserArea.Details.SecurityClearance') IS NOT NULL
+             AND JSON_VALUE(raw_payload, '$.UserArea.Details.SecurityClearance') NOT IN ('None', '0', 'Not Required')
+            THEN TRUE ELSE FALSE
+          END AS security_clearance_required,
+          DATE(TIMESTAMP(JSON_VALUE(raw_payload, '$.PublicationStartDate'))) AS posted_date
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_usajobs_posting`
+        WHERE source_posting_key IS NOT NULL
+      ) S ON T.source_id = S.source_id AND T.source_posting_key = S.source_posting_key
+      WHEN NOT MATCHED THEN
+        INSERT (job_posting_id, source_id, source_posting_key, posting_url, job_title, job_description,
+                work_schedule, employer_id, location_id, salary_min, salary_max, salary_currency,
+                salary_interval, security_clearance_required, posted_date)
+        VALUES (S.job_posting_id, S.source_id, S.source_posting_key, S.posting_url, S.job_title,
+                S.job_description, S.work_schedule, S.employer_id, S.location_id, S.salary_min,
+                S.salary_max, S.salary_currency, S.salary_interval, S.security_clearance_required,
+                S.posted_date);
     END
   SQL
   depends_on = [google_bigquery_table.transformed_tables]
@@ -1244,11 +1475,128 @@ resource "google_bigquery_routine" "sp_transform_adzuna" {
   language     = "SQL"
   definition_body = <<-SQL
     BEGIN
-      -- Populate dim_employer, dim_occupation, dim_location from raw_adzuna_posting
-      -- Populate fact_job_posting
-      -- (full mapping to be completed with Python scraper field names)
-      SELECT 1;
+      -- 1. Populate dim_source_system
+      MERGE `${var.project_id}.${var.bq_dataset_id}.dim_source_system` T
+      USING (SELECT 'adzuna' AS source_id, 'Adzuna' AS source_name) S
+      ON T.source_id = S.source_id
+      WHEN NOT MATCHED THEN INSERT (source_id, source_name) VALUES (S.source_id, S.source_name);
+
+      -- 2. Populate dim_employer from Adzuna raw_payload
+      MERGE `${var.project_id}.${var.bq_dataset_id}.dim_employer` T
+      USING (
+        SELECT DISTINCT
+          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.company.display_name'))) AS employer_id,
+          JSON_VALUE(raw_payload, '$.company.display_name') AS employer_name
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_adzuna_posting`
+        WHERE JSON_VALUE(raw_payload, '$.company.display_name') IS NOT NULL
+      ) S ON T.employer_id = S.employer_id
+      WHEN NOT MATCHED THEN INSERT (employer_id, employer_name)
+        VALUES (S.employer_id, S.employer_name);
+
+      -- 3. Populate dim_location from Adzuna raw_payload
+      MERGE `${var.project_id}.${var.bq_dataset_id}.dim_location` T
+      USING (
+        SELECT DISTINCT
+          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.location.display_name'))) AS location_id,
+          'US' AS country_code,
+          CAST(NULL AS STRING) AS state_code,
+          JSON_VALUE(raw_payload, '$.location.display_name') AS city_name
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_adzuna_posting`
+        WHERE JSON_VALUE(raw_payload, '$.location.display_name') IS NOT NULL
+      ) S ON T.location_id = S.location_id
+      WHEN NOT MATCHED THEN INSERT (location_id, country_code, state_code, city_name)
+        VALUES (S.location_id, S.country_code, S.state_code, S.city_name);
+
+      -- 4. Populate fact_job_posting from Adzuna raw_payload
+      MERGE `${var.project_id}.${var.bq_dataset_id}.fact_job_posting` T
+      USING (
+        SELECT
+          GENERATE_UUID() AS job_posting_id,
+          source_id,
+          source_posting_key,
+          JSON_VALUE(raw_payload, '$.redirect_url') AS posting_url,
+          JSON_VALUE(raw_payload, '$.title') AS job_title,
+          JSON_VALUE(raw_payload, '$.description') AS job_description,
+          JSON_VALUE(raw_payload, '$.contract_time') AS work_schedule,
+          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.company.display_name'))) AS employer_id,
+          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.location.display_name'))) AS location_id,
+          SAFE_CAST(JSON_VALUE(raw_payload, '$.salary_min') AS NUMERIC) AS salary_min,
+          SAFE_CAST(JSON_VALUE(raw_payload, '$.salary_max') AS NUMERIC) AS salary_max,
+          'USD' AS salary_currency,
+          'year' AS salary_interval,
+          FALSE AS security_clearance_required,
+          DATE(TIMESTAMP(JSON_VALUE(raw_payload, '$.created'))) AS posted_date
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_adzuna_posting`
+        WHERE source_posting_key IS NOT NULL
+      ) S ON T.source_id = S.source_id AND T.source_posting_key = S.source_posting_key
+      WHEN NOT MATCHED THEN
+        INSERT (job_posting_id, source_id, source_posting_key, posting_url, job_title, job_description,
+                work_schedule, employer_id, location_id, salary_min, salary_max, salary_currency,
+                salary_interval, security_clearance_required, posted_date)
+        VALUES (S.job_posting_id, S.source_id, S.source_posting_key, S.posting_url, S.job_title,
+                S.job_description, S.work_schedule, S.employer_id, S.location_id, S.salary_min,
+                S.salary_max, S.salary_currency, S.salary_interval, S.security_clearance_required,
+                S.posted_date);
     END
   SQL
   depends_on = [google_bigquery_table.transformed_tables]
+}
+
+# ── Cloud Build Triggers ───────────────────────────────────────────────────
+
+resource "google_cloudbuild_trigger" "scraper_trigger" {
+  name     = "scraper-build-deploy"
+  location = var.region
+  project  = var.project_id
+
+  github {
+    owner = var.github_owner
+    name  = var.github_repo
+    push {
+      branch = "^main$"
+    }
+  }
+
+  included_files = ["scraper/**"]
+  filename       = "scraper/cloudbuild.yaml"
+
+  depends_on = [google_project_service.cloudbuild]
+}
+
+resource "google_cloudbuild_trigger" "loader_trigger" {
+  name     = "loader-build-deploy"
+  location = var.region
+  project  = var.project_id
+
+  github {
+    owner = var.github_owner
+    name  = var.github_repo
+    push {
+      branch = "^main$"
+    }
+  }
+
+  included_files = ["loader/**"]
+  filename       = "loader/cloudbuild.yaml"
+
+  depends_on = [google_project_service.cloudbuild]
+}
+
+resource "google_cloudbuild_trigger" "streamlit_trigger" {
+  name     = "streamlit-build-deploy"
+  location = var.region
+  project  = var.project_id
+
+  github {
+    owner = var.github_owner
+    name  = var.github_repo
+    push {
+      branch = "^main$"
+    }
+  }
+
+  included_files = ["streamlit/**"]
+  filename       = "streamlit/cloudbuild.yaml"
+
+  depends_on = [google_project_service.cloudbuild]
 }

@@ -3,6 +3,7 @@
   { "name": "bls_series_id",         "type": "STRING",    "mode": "NULLABLE" },
   { "name": "time_id",               "type": "STRING",    "mode": "NULLABLE" },
   { "name": "source_id",             "type": "STRING",    "mode": "NULLABLE" },
+  { "name": "metric_id",             "type": "STRING",    "mode": "NULLABLE" },
   { "name": "observation_value",     "type": "NUMERIC",   "mode": "NULLABLE" },
   { "name": "observation_date",      "type": "DATE",      "mode": "NULLABLE" }
 ]
