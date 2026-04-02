@@ -336,7 +336,7 @@ resource "google_project_service" "secretmanager" {
 # Configure KMS keyring.
 resource "google_kms_key_ring" "secrets" {
   name     = "nazimz-keyring"
-  location = var.region
+  location = "global"
 }
 
 # Configure the key for securing credentials.
