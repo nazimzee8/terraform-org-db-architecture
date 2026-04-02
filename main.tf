@@ -979,7 +979,6 @@ resource "google_workflows_workflow" "etl_workflow" {
   description         = "GCS -> BigQuery raw load -> BigQuery transform -> Cloud Run loader -> Cloud SQL"
   service_account     = local.sa_workflow_email
   call_log_level      = "LOG_ERRORS_ONLY"
-  deletion_protection = false
 
   user_env_vars = {
     PROJECT_ID        = var.project_id
