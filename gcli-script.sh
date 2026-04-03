@@ -38,17 +38,10 @@ gcloud iam service-accounts create sa-app-deployer \
 
 gcloud projects get-iam-policy nazimz-database --format=json > policy.json
 
-gcloud projects set-iam-policy nazimz-database policy.json
-
 gcloud services enable secretmanager.googleapis.com
 
-gcloud secrets create db-password \
-  --replication-policy="automatic"
+gcloud builds submit . --config=streamlit/cloudbuild.yaml --region=us-west2
+gcloud builds submit . --config=loader/cloudbuild.yaml --region=us-west2
+gcloud builds submit . --config=scraper/cloudbuild.yaml --region=us-west2
 
-echo -n "nazimz-db-passwd" > db-credentials.txt | gcloud secrets versions add db-password --data-file=db-credentials.txt
-
-gcloud secrets add-iam-policy-binding db-password \
-  --member="serviceAccount:sa-db-loader@nazimz-database.iam.gserviceaccount.com" \
-  --role="roles/secretmanager.secretAccessor"
-
-
+gcloud projects set-iam-policy nazimz-database policy.json

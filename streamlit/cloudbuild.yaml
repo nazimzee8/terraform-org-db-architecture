@@ -1,5 +1,5 @@
 steps:
-  # Step 1 — Build multi-stage image
+  # Step 1 - Build multi-stage image
   - name: 'gcr.io/cloud-builders/docker'
     id: build
     args:
@@ -14,32 +14,38 @@ steps:
       - 'streamlit'
     waitFor: ['-']
 
-  # Step 2 — Push both tags
+  # Step 2 - Push both tags
   - name: 'gcr.io/cloud-builders/docker'
     id: push
     args: ['push', '--all-tags', '$_IMAGE_URI']
     waitFor: ['build']
 
-  # Step 3 — Update Cloud Run service image with cold-start flags
+  # Step 3 - Optional deploy. Default is disabled so image builds are decoupled
+  # from Cloud Run readiness and service-account bindings.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: deploy
-    entrypoint: gcloud
+    entrypoint: bash
     args:
-      - run
-      - services
-      - update
-      - 'streamlit-app-service'
-      - '--image=$_IMAGE_URI:${_TAG}'
-      - '--region=$_REGION'
-      - '--min-instances=1'
-      - '--cpu-boost'
-      - '--no-cpu-throttling'
+      - -c
+      - |
+        if [[ "${_DEPLOY}" != "true" ]]; then
+          echo "Skipping Cloud Run deploy because _DEPLOY=${_DEPLOY}."
+          exit 0
+        fi
+        gcloud run services update "${_SERVICE_NAME}" \
+          --image="${_IMAGE_URI}:${_TAG}" \
+          --region="${_REGION}" \
+          --min-instances=1 \
+          --cpu-boost \
+          --no-cpu-throttling
     waitFor: ['push']
 
 substitutions:
+  _DEPLOY: 'false'
   _TAG: 'latest'
   _IMAGE_URI: 'us-west2-docker.pkg.dev/nazimz-database/streamlit-docker-img/streamlit'
   _REGION: 'us-west2'
+  _SERVICE_NAME: 'streamlit-app-service'
 
 options:
   logging: CLOUD_LOGGING_ONLY

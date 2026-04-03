@@ -1,5 +1,5 @@
 steps:
-  # Step 1 — Build multi-stage image
+  # Step 1 - Build multi-stage image
   - name: 'gcr.io/cloud-builders/docker'
     id: build
     args:
@@ -14,29 +14,35 @@ steps:
       - 'scraper'
     waitFor: ['-']
 
-  # Step 2 — Push both tags
+  # Step 2 - Push both tags
   - name: 'gcr.io/cloud-builders/docker'
     id: push
     args: ['push', '--all-tags', '$_IMAGE_URI']
     waitFor: ['build']
 
-  # Step 3 — Update Cloud Run job image
+  # Step 3 - Optional deploy. Default is disabled so image builds are decoupled
+  # from Cloud Run job existence and iam.serviceAccountUser requirements.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: deploy
-    entrypoint: gcloud
+    entrypoint: bash
     args:
-      - run
-      - jobs
-      - update
-      - 'monthly-scraper-job'
-      - '--image=$_IMAGE_URI:${_TAG}'
-      - '--region=$_REGION'
+      - -c
+      - |
+        if [[ "${_DEPLOY}" != "true" ]]; then
+          echo "Skipping Cloud Run job deploy because _DEPLOY=${_DEPLOY}."
+          exit 0
+        fi
+        gcloud run jobs update "${_JOB_NAME}" \
+          --image="${_IMAGE_URI}:${_TAG}" \
+          --region="${_REGION}"
     waitFor: ['push']
 
 substitutions:
+  _DEPLOY: 'false'
   _TAG: 'latest'
   _IMAGE_URI: 'us-west2-docker.pkg.dev/nazimz-database/scraper-docker-img/scraper'
   _REGION: 'us-west2'
+  _JOB_NAME: 'monthly-scraper-job'
 
 options:
   logging: CLOUD_LOGGING_ONLY
