@@ -7,17 +7,15 @@ steps:
       - '--no-cache'
       - '-t'
       - '$_IMAGE_URI:${_TAG}'
-      - '-t'
-      - '$_IMAGE_URI:latest'
       - '-f'
       - 'streamlit/Dockerfile'
       - 'streamlit'
     waitFor: ['-']
 
-  # Step 2 - Push both tags
+  # Step 2 - Push the immutable tag chosen for this build
   - name: 'gcr.io/cloud-builders/docker'
     id: push
-    args: ['push', '--all-tags', '$_IMAGE_URI']
+    args: ['push', '$_IMAGE_URI:${_TAG}']
     waitFor: ['build']
 
   # Step 3 - Optional deploy. Default is disabled so image builds are decoupled
@@ -42,7 +40,7 @@ steps:
 
 substitutions:
   _DEPLOY: 'false'
-  _TAG: 'latest'
+  _TAG: 'manual'
   _IMAGE_URI: 'us-west2-docker.pkg.dev/nazimz-database/streamlit-docker-img/streamlit'
   _REGION: 'us-west2'
   _SERVICE_NAME: 'streamlit-app-service'
