@@ -45,3 +45,4 @@ gcloud builds submit . --config=loader/cloudbuild.yaml --region=us-west2
 gcloud builds submit . --config=scraper/cloudbuild.yaml --region=us-west2
 
 gcloud projects set-iam-policy nazimz-database policy.json
+gcloud services enable run.googleapis.com vpcaccess.googleapis.com bigquery.googleapis.com storage.googleapis.com

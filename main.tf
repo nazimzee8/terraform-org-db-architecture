@@ -250,7 +250,8 @@ locals {
       "roles/bigquery.dataOwner",
       "roles/storage.admin", 
       "roles/workflows.admin",
-      "roles/artifactregistry.admin"
+      "roles/artifactregistry.admin",
+      "roles/cloudbuild.editor"
       ],
       var.enable_cloudsql ? ["roles/cloudsql.editor"] : []
     )
