@@ -737,10 +737,12 @@ resource "google_cloud_run_v2_service" "streamlit-app" {
   }
 }
 
-resource "google_cloud_run_v2_service_iam_member" "streamlit_public_access"
+# Enable all Users public access to streamlit app.
+resource "google_cloud_run_v2_service_iam_member" "streamlit_public_access" {
   name = var.app_service_name
   member = "allUsers"
   role = "roles/run.invoker"
+}
 
 # Enable Artifact Registry API
 resource "google_project_service" "artifactregistry" {
