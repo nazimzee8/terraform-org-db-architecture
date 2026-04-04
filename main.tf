@@ -250,8 +250,6 @@ locals {
       "roles/bigquery.dataOwner",
       "roles/storage.admin", 
       "roles/workflows.admin",
-      "roles/artifactregistry.admin",
-      "roles/cloudbuild.editor"
       ],
       var.enable_cloudsql ? ["roles/cloudsql.editor"] : []
     )
@@ -275,6 +273,10 @@ locals {
     (local.sa_app_account) = [
       "roles/logging.logWriter",
       "roles/bigquery.jobUser"
+    ]
+
+    (local.sa_app_deployer) = [
+      "roles/cloudbuild.editor"
     ]
 
     (local.sa_cloudbuild) = [
@@ -734,6 +736,11 @@ resource "google_cloud_run_v2_service" "streamlit-app" {
     ignore_changes = [template[0].containers[0].image]
   }
 }
+
+resource "google_cloud_run_v2_service_iam_member" "streamlit_public_access"
+  name = var.app_service_name
+  member = "allUsers"
+  role = "roles/run.invoker"
 
 # Enable Artifact Registry API
 resource "google_project_service" "artifactregistry" {
