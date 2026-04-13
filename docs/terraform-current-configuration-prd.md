@@ -139,7 +139,7 @@ Each Cloud Build config has three steps:
 2. Push the image to Artifact Registry.
 3. Update the Cloud Run job or service with the new image when `_DEPLOY=true`.
 
-Current deployment behavior: all three YAML files now set `_DEPLOY=true` by default. With the repo defaults, a GitHub push to `main` that matches the trigger path filter builds the image, pushes it to Artifact Registry, and updates the corresponding Cloud Run job or service.
+Current deployment behavior: all three YAML files now set `_DEPLOY=true` by default. The Streamlit build config intentionally pushes and deploys mutable `:latest` even if an existing console-created trigger overrides `_TAG` with `$SHORT_SHA`; it also accepts uppercase `_DEPLOY=TRUE` from that trigger.
 
 Required trigger substitution intent for automatic deployment:
 

@@ -6,7 +6,7 @@ steps:
       - build
       - '--no-cache'
       - '-t'
-      - '$_IMAGE_URI:${_TAG}'
+      - '$_IMAGE_URI:latest'
       - '-f'
       - 'streamlit/Dockerfile'
       - 'streamlit'
@@ -15,7 +15,7 @@ steps:
   # Step 2 - Push the mutable latest tag for this build
   - name: 'gcr.io/cloud-builders/docker'
     id: push
-    args: ['push', '$_IMAGE_URI:${_TAG}']
+    args: ['push', '$_IMAGE_URI:latest']
     waitFor: ['build']
 
   # Step 3 - Deploy the Streamlit Cloud Run service after a successful image push.
@@ -25,12 +25,12 @@ steps:
     args:
       - -c
       - |
-        if [[ "${_DEPLOY}" != "true" ]]; then
+        if [[ "${_DEPLOY,,}" != "true" ]]; then
           echo "Skipping Cloud Run deploy because _DEPLOY=${_DEPLOY}."
           exit 0
         fi
         gcloud run services update "${_SERVICE_NAME}" \
-          --image="${_IMAGE_URI}:${_TAG}" \
+          --image="${_IMAGE_URI}:latest" \
           --region="${_REGION}" \
           --min-instances=1 \
           --cpu-boost \
