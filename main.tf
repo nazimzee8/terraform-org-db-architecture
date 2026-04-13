@@ -411,7 +411,7 @@ resource "google_project_service_identity" "secretmanager_agent" {
 resource "google_kms_crypto_key_iam_member" "secretmanager_cmek" {
   crypto_key_id = google_kms_crypto_key.secrets.id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
-  member        = "serviceAccount:${google_project_service_identity.secretmanager_agent.email}"
+  member        = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-secretmanager.iam.gserviceaccount.com"
 }
 
 # Configure secret for API Key for BLS
@@ -1815,3 +1815,4 @@ resource "google_cloudbuild_trigger" "streamlit_trigger" {
     google_service_account_iam_member.cloudbuild_access_application_agent
   ]
 }
+
