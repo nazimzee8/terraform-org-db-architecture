@@ -18,8 +18,7 @@ steps:
     args: ['push', '$_IMAGE_URI:${_TAG}']
     waitFor: ['build']
 
-  # Step 3 - Optional deploy. Default is disabled so image builds are decoupled
-  # from Cloud Run job existence and iam.serviceAccountUser requirements.
+  # Step 3 - Deploy the scraper Cloud Run job after a successful image push.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: deploy
     entrypoint: bash
@@ -36,7 +35,7 @@ steps:
     waitFor: ['push']
 
 substitutions:
-  _DEPLOY: 'false'
+  _DEPLOY: 'true'
   _TAG: 'manual'
   _IMAGE_URI: 'us-west2-docker.pkg.dev/nazimz-database/scraper-docker-img/scraper'
   _REGION: 'us-west2'

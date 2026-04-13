@@ -11,8 +11,8 @@ terraform {
   }
 }
 
-variable "project_id" {type = string}
-variable "region" {type = string}
+variable "project_id" { type = string }
+variable "region" { type = string }
 
 variable "keywords" {
   type    = string
@@ -128,11 +128,11 @@ variable "keywords_list" {
   ]
 }
 
-variable "storage_bucket_name" {type = string}
-variable "workflow_name" {type = string}
-variable "bq_load_job_id" {type = string}
-variable "bq_query_job_id" {type = string}
-variable "bq_dataset_id"  {type = string}
+variable "storage_bucket_name" { type = string }
+variable "workflow_name" { type = string }
+variable "bq_load_job_id" { type = string }
+variable "bq_query_job_id" { type = string }
+variable "bq_dataset_id" { type = string }
 
 variable "bq_raw_tables" {
   description = "Map of BigQuery tables to create"
@@ -166,21 +166,21 @@ variable "common_labels" {
   default = {}
 }
 
-variable db_user  {type = string}
-variable db_name  {type = string}
+variable "db_user" { type = string }
+variable "db_name" { type = string }
 
-variable "adzuna_country" {type = string}  
+variable "adzuna_country" { type = string }
 
 
 
-variable "app_service_image" {type = string}
-variable "app_service_name" {type = string}
+variable "app_service_image" { type = string }
+variable "app_service_name" { type = string }
 
-variable "scraper_job_name" {type = string}
-variable "scraper_image" {type = string}
+variable "scraper_job_name" { type = string }
+variable "scraper_image" { type = string }
 
-variable "loader_job_name" {type = string}
-variable "loader_image" {type = string}
+variable "loader_job_name" { type = string }
+variable "loader_image" { type = string }
 
 variable "enable_cloudsql" {
   type    = bool
@@ -188,7 +188,7 @@ variable "enable_cloudsql" {
 }
 
 variable "github_owner" { type = string }
-variable "github_repo"  { type = string }
+variable "github_repo" { type = string }
 
 provider "google" {
   project = var.project_id
@@ -205,6 +205,8 @@ data "google_project" "current" {}
 locals {
   sa_scraper             = "serviceAccount:sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
   sa_loader              = "serviceAccount:sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
+  sa_scraper_email       = "sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
+  sa_loader_email        = "sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
   sa_scheduler           = "serviceAccount:sa-scheduler@${var.project_id}.iam.gserviceaccount.com"
   sa_manager             = "serviceAccount:sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
   sa_secret_manager      = "serviceAccount:sa-secret-manager@${var.project_id}.iam.gserviceaccount.com"
@@ -214,7 +216,7 @@ locals {
   sa_app_deployer        = "serviceAccount:sa-app-deployer@${var.project_id}.iam.gserviceaccount.com"
   sa_workflow_email      = "sa-data-workflow@${var.project_id}.iam.gserviceaccount.com"
   sa_event_trigger_email = "sa-event-trigger@${var.project_id}.iam.gserviceaccount.com"
-  sa_app_account_email   = "sa-app-account@${var.project_id}.iam.gserviceaccount.com" 
+  sa_app_account_email   = "sa-app-account@${var.project_id}.iam.gserviceaccount.com"
   sa_app_deployer_email  = "sa-app-deployer@${var.project_id}.iam.gserviceaccount.com"
   sa_scheduler_email     = "sa-scheduler@${var.project_id}.iam.gserviceaccount.com"
   sa_cloudbuild          = "serviceAccount:${data.google_project.current.number}@cloudbuild.gserviceaccount.com"
@@ -245,11 +247,11 @@ locals {
 
     (local.sa_manager) = concat(
       [
-      "roles/compute.networkAdmin",
-      "roles/run.admin",
-      "roles/bigquery.dataOwner",
-      "roles/storage.admin", 
-      "roles/workflows.admin",
+        "roles/compute.networkAdmin",
+        "roles/run.admin",
+        "roles/bigquery.dataOwner",
+        "roles/storage.admin",
+        "roles/workflows.admin",
       ],
       var.enable_cloudsql ? ["roles/cloudsql.editor"] : []
     )
@@ -260,6 +262,7 @@ locals {
     ]
 
     (local.sa_event_trigger) = [
+      "roles/eventarc.eventReceiver",
       "roles/workflows.invoker",
       "roles/pubsub.publisher"
     ]
@@ -267,13 +270,16 @@ locals {
     (local.sa_workflow) = [
       "roles/logging.logWriter",
       "roles/bigquery.jobUser",
-      "roles/bigquery.dataEditor"
+      "roles/bigquery.dataEditor",
+      "roles/run.viewer"
     ]
 
-    (local.sa_app_account) = [
-      "roles/logging.logWriter",
-      "roles/bigquery.jobUser"
-    ]
+    (local.sa_app_account) = concat(
+      [
+        "roles/logging.logWriter",
+      ],
+      var.enable_cloudsql ? ["roles/vpcaccess.user", "roles/cloudsql.client"] : []
+    )
 
     (local.sa_app_deployer) = [
       "roles/cloudbuild.editor"
@@ -306,6 +312,8 @@ resource "google_project_iam_member" "project_bindings" {
   project = var.project_id
   role    = each.value.role
   member  = each.value.member
+
+  depends_on = [google_project_service.cloudresourcemanager]
 }
 
 # Enable deployer agent to access the application agent
@@ -313,14 +321,33 @@ resource "google_service_account_iam_member" "deployer_access_application_agent"
   service_account_id = "projects/${var.project_id}/serviceAccounts/${local.sa_app_account_email}"
   role               = "roles/iam.serviceAccountUser"
   member             = local.sa_app_deployer
+
+  depends_on = [google_project_service.iam]
 }
 
 resource "google_service_account_iam_member" "cloudbuild_access_application_agent" {
   service_account_id = "projects/${var.project_id}/serviceAccounts/${local.sa_app_account_email}"
   role               = "roles/iam.serviceAccountUser"
   member             = local.sa_cloudbuild
+
+  depends_on = [google_project_service.iam]
 }
 
+resource "google_service_account_iam_member" "cloudbuild_access_scraper_agent" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${local.sa_scraper_email}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = local.sa_cloudbuild
+
+  depends_on = [google_project_service.iam]
+}
+
+resource "google_service_account_iam_member" "cloudbuild_access_loader_agent" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${local.sa_loader_email}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = local.sa_cloudbuild
+
+  depends_on = [google_project_service.iam]
+}
 
 # Enable the Secret Manager API. GCP creates the service agent when this is enabled.
 resource "google_project_service" "secretmanager" {
@@ -329,10 +356,35 @@ resource "google_project_service" "secretmanager" {
   disable_on_destroy = false
 }
 
+resource "google_project_service" "cloudkms" {
+  project            = var.project_id
+  service            = "cloudkms.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "iam" {
+  project            = var.project_id
+  service            = "iam.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "cloudresourcemanager" {
+  project            = var.project_id
+  service            = "cloudresourcemanager.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "logging" {
+  project            = var.project_id
+  service            = "logging.googleapis.com"
+  disable_on_destroy = false
+}
+
 # Configure KMS keyring.
 resource "google_kms_key_ring" "secrets" {
-  name     = "nazimz-keyring"
-  location = "global"
+  name       = "nazimz-keyring"
+  location   = "global"
+  depends_on = [google_project_service.cloudkms]
 }
 
 # Configure the key for securing credentials.
@@ -462,7 +514,7 @@ resource "google_secret_manager_secret" "db_private_pwd" {
 
 # Role for scraper to write data to our cloud storage bucket.
 resource "google_storage_bucket_iam_member" "scraper_bucket_writer" {
-  bucket = var.storage_bucket_name
+  bucket = google_storage_bucket.ingestion_bucket.name
   role   = "roles/storage.objectCreator"
   member = local.sa_scraper
 }
@@ -505,7 +557,7 @@ resource "google_secret_manager_secret_iam_member" "scraper_adzuna_api_accessor"
 # Enable loader agent to read data from our big query dataset.
 resource "google_bigquery_dataset_iam_member" "loader_dataset_viewer" {
   project    = var.project_id
-  dataset_id = var.bq_dataset_id
+  dataset_id = google_bigquery_dataset.employment_analytics.dataset_id
   role       = "roles/bigquery.dataViewer"
   member     = local.sa_loader
 }
@@ -514,25 +566,32 @@ resource "google_bigquery_dataset_iam_member" "loader_dataset_viewer" {
 resource "google_cloud_run_v2_job_iam_member" "workflow_invokes_loader" {
   project  = var.project_id
   location = var.region
-  name     = var.loader_job_name
-  role   = "roles/run.invoker"
-  member = local.sa_workflow
+  name     = google_cloud_run_v2_job.loader_job.name
+  role     = "roles/run.invoker"
+  member   = local.sa_workflow
 }
 
-# Enable access to bigquery password.
+# Enable loader access to the Cloud SQL user password.
 resource "google_secret_manager_secret_iam_member" "bigquery_accessor" {
-  secret_id = google_secret_manager_secret.db_master_pwd.secret_id
+  secret_id = google_secret_manager_secret.db_private_pwd.secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = local.sa_loader
+}
+
+# Enable Streamlit access to the Cloud SQL user password.
+resource "google_secret_manager_secret_iam_member" "app_db_password_accessor" {
+  secret_id = google_secret_manager_secret.db_private_pwd.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = local.sa_app_account
 }
 
 # Role for scheduler can invoke only our scraper job.
 resource "google_cloud_run_v2_job_iam_member" "scheduler_invokes_scraper" {
   project  = var.project_id
   location = var.region
-  name     = var.scraper_job_name
-  role   = "roles/run.invoker"
-  member = local.sa_scheduler
+  name     = google_cloud_run_v2_job.scraper_job.name
+  role     = "roles/run.invoker"
+  member   = local.sa_scheduler
 }
 
 # Enable Cloud Scheduler API
@@ -565,27 +624,35 @@ resource "google_cloud_scheduler_job" "monthly_scraper_trigger" {
   ]
 }
 
+# Enable Compute Engine API for VPC, firewall, Cloud NAT, and private service access resources.
+resource "google_project_service" "compute" {
+  project            = var.project_id
+  service            = "compute.googleapis.com"
+  disable_on_destroy = false
+}
 # Creating the VPC network to host our public and private subnets.
 resource "google_compute_network" "vpc_network" {
-  name = "nazimz-db-network"
+  name                    = "nazimz-db-network"
   auto_create_subnetworks = false
-  routing_mode = "REGIONAL"
+  routing_mode            = "REGIONAL"
+
+  depends_on = [google_project_service.compute]
 }
 
 # Create the private subnet within our VPC.
 resource "google_compute_subnetwork" "private_subnet" {
-  name = "private-subnet"
-  region = var.region
-  network = google_compute_network.vpc_network.self_link
-  ip_cidr_range = "10.0.0.0/24"
+  name                     = "private-subnet"
+  region                   = var.region
+  network                  = google_compute_network.vpc_network.self_link
+  ip_cidr_range            = "10.0.0.0/24"
   private_ip_google_access = true
 }
 
 # Create the connector subnet within our VPC.
 resource "google_compute_subnetwork" "connector_subnet" {
-  name = "connector-subnet"
-  region = var.region
-  network = google_compute_network.vpc_network.self_link
+  name          = "connector-subnet"
+  region        = var.region
+  network       = google_compute_network.vpc_network.self_link
   ip_cidr_range = "10.0.1.0/28"
 }
 
@@ -597,6 +664,8 @@ resource "google_vpc_access_connector" "connector" {
     name       = google_compute_subnetwork.connector_subnet.name
     project_id = var.project_id
   }
+
+  depends_on = [google_project_service.vpcaccess]
 }
 
 # Create the Cloud Router for our Cloud NAT
@@ -617,7 +686,7 @@ resource "google_compute_router_nat" "nat_gateway" {
 
   # CRITICAL FIX: Apply NAT to all subnets in the VPC
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
-  
+
   log_config {
     enable = true
     filter = "ERRORS_ONLY"
@@ -626,8 +695,9 @@ resource "google_compute_router_nat" "nat_gateway" {
 
 # Enable connection from our VPC network to Google's service network that has Cloud SQL.
 resource "google_project_service" "service_networking" {
-  project = var.project_id
-  service = "servicenetworking.googleapis.com"
+  project            = var.project_id
+  service            = "servicenetworking.googleapis.com"
+  disable_on_destroy = false
 }
 
 resource "google_compute_global_address" "private_service_range" {
@@ -642,9 +712,11 @@ resource "google_service_networking_connection" "private_vpc_connection" {
   network                 = google_compute_network.vpc_network.self_link
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.private_service_range.name]
-  depends_on = [google_project_service.service_networking]
+  depends_on              = [google_project_service.service_networking]
 }
 
+# The DB_PASSWORD secret value is intentionally managed outside Terraform so it
+# does not land in Terraform state. A latest version must exist before apply.
 data "google_secret_manager_secret_version_access" "db_password" {
   project = var.project_id
   secret  = google_secret_manager_secret.db_private_pwd.secret_id
@@ -666,24 +738,24 @@ resource "google_sql_user" "users" {
 
 # Configure the private database to host our cloud sql instance.
 resource "google_sql_database" "database" {
-  name     = "nazimz-private-sql-db"
+  name     = var.db_name
   instance = google_sql_database_instance.private_db_instance.name
 }
 
 # Configure the private cloud sql database within the private subnet.
 resource "google_sql_database_instance" "private_db_instance" {
-  name = "nazimz-private-sql-instance"
+  name             = "nazimz-private-sql-instance"
   database_version = "MYSQL_8_0"
-  region = var.region
+  region           = var.region
   settings {
     tier = "db-f1-micro"
     ip_configuration {
-      ipv4_enabled = false
+      ipv4_enabled    = false
       private_network = google_compute_network.vpc_network.self_link
     }
   }
   deletion_protection = true
-  depends_on = [google_service_networking_connection.private_vpc_connection]
+  depends_on          = [google_service_networking_connection.private_vpc_connection, google_project_service.cloudsql]
 }
 
 # Configure the service to host the streamlit application.
@@ -695,6 +767,11 @@ resource "google_cloud_run_v2_service" "streamlit-app" {
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
     service_account       = local.sa_app_account_email
 
+    vpc_access {
+      connector = google_vpc_access_connector.connector.id
+      egress    = "PRIVATE_RANGES_ONLY"
+    }
+
     scaling {
       min_instance_count = 1
     }
@@ -702,11 +779,25 @@ resource "google_cloud_run_v2_service" "streamlit-app" {
     containers {
       image = var.app_service_image
 
-      dynamic "env" {
-        for_each = local.non_secret_bq_env
-        content {
-          name  = env.key
-          value = env.value
+      env {
+        name  = "DB_HOST"
+        value = google_sql_database_instance.private_db_instance.private_ip_address
+      }
+      env {
+        name  = "DB_NAME"
+        value = var.db_name
+      }
+      env {
+        name  = "DB_USER"
+        value = var.db_user
+      }
+      env {
+        name = "DB_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.db_private_pwd.secret_id
+            version = "latest"
+          }
         }
       }
       ports {
@@ -735,13 +826,24 @@ resource "google_cloud_run_v2_service" "streamlit-app" {
   lifecycle {
     ignore_changes = [template[0].containers[0].image]
   }
+
+  depends_on = [
+    google_project_service.run,
+    google_secret_manager_secret_iam_member.app_db_password_accessor,
+    google_vpc_access_connector.connector,
+    google_sql_database.database
+  ]
 }
 
 # Enable all Users public access to streamlit app.
 resource "google_cloud_run_v2_service_iam_member" "streamlit_public_access" {
-  name = var.app_service_name
-  member = "allUsers"
-  role = "roles/run.invoker"
+  project  = var.project_id
+  location = var.region
+  name     = var.app_service_name
+  member   = "allUsers"
+  role     = "roles/run.invoker"
+
+  depends_on = [google_cloud_run_v2_service.streamlit-app]
 }
 
 # Enable Artifact Registry API
@@ -755,6 +857,47 @@ resource "google_project_service" "artifactregistry" {
 resource "google_project_service" "cloudbuild" {
   project            = var.project_id
   service            = "cloudbuild.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "run" {
+  project            = var.project_id
+  service            = "run.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "cloudsql" {
+  project            = var.project_id
+  service            = "sqladmin.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "vpcaccess" {
+  project            = var.project_id
+  service            = "vpcaccess.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "workflows" {
+  project            = var.project_id
+  service            = "workflows.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "bigquery" {
+  project            = var.project_id
+  service            = "bigquery.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "storage" {
+  project            = var.project_id
+  service            = "storage.googleapis.com"
+  disable_on_destroy = false
+}
+resource "google_project_service" "pubsub" {
+  project            = var.project_id
+  service            = "pubsub.googleapis.com"
   disable_on_destroy = false
 }
 
@@ -778,14 +921,14 @@ resource "google_artifact_registry_repository" "loader_repo" {
 
 # Create Artifact Registry for docker image to host streamlit app
 resource "google_artifact_registry_repository" "streamlit_repo" {
-  location      =  var.region
+  location      = var.region
   repository_id = "streamlit-docker-img"
   description   = "Docker image repository for streamlit app."
   format        = "DOCKER"
-  
-  # Optional: prevent tag overwrites in production
+
+  # Keep tags mutable so :latest can move to the newest Streamlit build.
   docker_config {
-    immutable_tags = true
+    immutable_tags = false
   }
 
   depends_on = [google_project_service.artifactregistry]
@@ -805,28 +948,28 @@ resource "google_cloud_run_v2_service_iam_member" "deployer_runs_service" {
   project  = var.project_id
   location = var.region
   name     = var.app_service_name
-  role   = "roles/run.developer"
-  member = local.sa_app_deployer
+  role     = "roles/run.developer"
+  member   = local.sa_app_deployer
 }
 
 # Configure firewall rule that only accepts inbound traffic from connector subnet.
 resource "google_compute_firewall" "enable_traffic_to_db" {
-  name = "enable-traffic-to-db"
-  network = google_compute_network.vpc_network.self_link
+  name      = "enable-traffic-to-db"
+  network   = google_compute_network.vpc_network.self_link
   direction = "INGRESS"
-  priority = 1000
+  priority  = 1000
 
   source_ranges = [google_compute_subnetwork.connector_subnet.ip_cidr_range]
 
   allow {
     protocol = "tcp"
-    ports = ["3306"]
+    ports    = ["3306"]
   }
 }
 
 # Configure the Cloud Run job to scrape data from the Internet.
 resource "google_cloud_run_v2_job" "scraper_job" {
-  name = var.scraper_job_name
+  name     = var.scraper_job_name
   location = var.region
   template {
     task_count = 1
@@ -834,15 +977,15 @@ resource "google_cloud_run_v2_job" "scraper_job" {
       service_account = "sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
       vpc_access {
         connector = google_vpc_access_connector.connector.id
-        egress = "ALL_TRAFFIC"
+        egress    = "ALL_TRAFFIC"
       }
       containers {
         image = var.scraper_image
-        
+
         dynamic "env" {
           for_each = local.non_secret_bq_env
           content {
-            name = env.key
+            name  = env.key
             value = env.value
           }
         }
@@ -852,7 +995,7 @@ resource "google_cloud_run_v2_job" "scraper_job" {
           name = "BLS_API_KEY"
           value_source {
             secret_key_ref {
-              secret = google_secret_manager_secret.bls_api_key.secret_id
+              secret  = google_secret_manager_secret.bls_api_key.secret_id
               version = "latest"
             }
           }
@@ -895,7 +1038,7 @@ resource "google_cloud_run_v2_job" "scraper_job" {
         }
 
         env {
-          name = "INGESTION_BUCKET"
+          name  = "INGESTION_BUCKET"
           value = google_storage_bucket.ingestion_bucket.name
         }
         env {
@@ -907,29 +1050,51 @@ resource "google_cloud_run_v2_job" "scraper_job" {
           value = join(",", var.keywords_list)
         }
         volume_mounts {
-          name = "gcs-volume"
+          name       = "gcs-volume"
           mount_path = "/gcs"
         }
       }
       volumes {
         name = "gcs-volume"
         gcs {
-          bucket = google_storage_bucket.ingestion_bucket.name
+          bucket    = google_storage_bucket.ingestion_bucket.name
           read_only = false
         }
       }
     }
   }
-  depends_on = [google_storage_bucket_iam_member.scraper_bucket_writer]
-
   lifecycle {
     ignore_changes = [template[0].template[0].containers[0].image]
   }
+
+  depends_on = [
+    google_project_service.run,
+    google_storage_bucket_iam_member.scraper_bucket_writer,
+    google_vpc_access_connector.connector
+  ]
 }
 
-# Enable eventarc API. 
+# Enable eventarc API.
 resource "google_project_service" "eventarc" {
-  service = "eventarc.googleapis.com"
+  project            = var.project_id
+  service            = "eventarc.googleapis.com"
+  disable_on_destroy = false
+}
+# Allow Cloud Storage direct events to publish through Eventarc Pub/Sub transport.
+data "google_storage_project_service_account" "gcs_account" {
+  project    = var.project_id
+  depends_on = [google_project_service.storage]
+}
+
+resource "google_project_iam_member" "gcs_pubsub_publisher" {
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${data.google_storage_project_service_account.gcs_account.email_address}"
+
+  depends_on = [
+    google_project_service.pubsub,
+    google_project_service.storage
+  ]
 }
 
 # Configure an Eventarc trigger for the Cloud Storage Bucket when data is added to the bucket.
@@ -941,11 +1106,11 @@ resource "google_eventarc_trigger" "bucket_trigger" {
     attribute = "type"
     value     = "google.cloud.storage.object.v1.finalized"
   }
-  
+
   # Ensure matching_criteria includes bucket name
   matching_criteria {
     attribute = "bucket"
-    value     = var.storage_bucket_name
+    value     = google_storage_bucket.ingestion_bucket.name
   }
 
   event_data_content_type = "application/json"
@@ -956,30 +1121,34 @@ resource "google_eventarc_trigger" "bucket_trigger" {
     workflow = google_workflows_workflow.etl_workflow.id
   }
   depends_on = [
+    google_project_service.eventarc,
+    google_project_service.pubsub,
+    google_project_iam_member.gcs_pubsub_publisher,
+    google_storage_bucket_iam_member.event_bucket_retrieval,
     google_workflows_workflow.etl_workflow
   ]
 }
 
 # Enable EventArc to read and retrieve data from GCS Bucket
 resource "google_storage_bucket_iam_member" "event_bucket_retrieval" {
-  bucket = var.storage_bucket_name
+  bucket = google_storage_bucket.ingestion_bucket.name
   role   = "roles/storage.objectViewer"
   member = local.sa_event_trigger
 }
 
 resource "google_workflows_workflow" "etl_workflow" {
-  provider            = google-beta
-  name                = var.workflow_name
-  region              = var.region
-  description         = "GCS -> BigQuery raw load -> BigQuery transform -> Cloud Run loader -> Cloud SQL"
-  service_account     = local.sa_workflow_email
-  call_log_level      = "LOG_ERRORS_ONLY"
+  provider        = google-beta
+  name            = var.workflow_name
+  region          = var.region
+  description     = "GCS -> BigQuery raw load -> BigQuery transform -> Cloud Run loader -> Cloud SQL"
+  service_account = local.sa_workflow_email
+  call_log_level  = "LOG_ERRORS_ONLY"
 
   user_env_vars = {
-    PROJECT_ID        = var.project_id
-    BQ_DATASET_ID     = var.bq_dataset_id
-    BQ_LOCATION       = "US"
-    INGESTION_BUCKET  = google_storage_bucket.ingestion_bucket.name
+    PROJECT_ID       = var.project_id
+    BQ_DATASET_ID    = var.bq_dataset_id
+    BQ_LOCATION      = "US"
+    INGESTION_BUCKET = google_storage_bucket.ingestion_bucket.name
 
     RAW_BLS_TABLE     = "raw_bls_observation"
     RAW_USAJOBS_TABLE = "raw_usajobs_posting"
@@ -1140,6 +1309,27 @@ resource "google_workflows_workflow" "etl_workflow" {
                       - name: "RAW_TABLE"
                         value: $${raw_table}
           result: loader_execution
+          next: poll_loader_operation
+
+      - poll_loader_operation:
+          call: googleapis.run.v2.projects.locations.operations.get
+          args:
+            name: $${loader_execution.name}
+          result: loader_status
+
+      - check_loader_operation:
+          switch:
+            - condition: $${("done" in loader_status) and loader_status.done and not("error" in loader_status)}
+              next: done
+            - condition: $${("done" in loader_status) and loader_status.done and ("error" in loader_status)}
+              raise: $${loader_status.error}
+          next: wait_before_retry_loader
+
+      - wait_before_retry_loader:
+          call: sys.sleep
+          args:
+            seconds: 5
+          next: poll_loader_operation
 
       - done:
           return:
@@ -1152,13 +1342,14 @@ resource "google_workflows_workflow" "etl_workflow" {
   YAML
 
   depends_on = [
+    google_project_service.workflows,
     google_storage_bucket.ingestion_bucket
   ]
 }
 
 # Enable workflow agent to retrieve data from Google Cloud Storage Bucket
 resource "google_storage_bucket_iam_member" "workflow_bucket_reader" {
-  bucket = var.storage_bucket_name
+  bucket = google_storage_bucket.ingestion_bucket.name
   role   = "roles/storage.objectViewer"
   member = local.sa_workflow
 }
@@ -1166,34 +1357,27 @@ resource "google_storage_bucket_iam_member" "workflow_bucket_reader" {
 # Enable workflow agent to read, write, and create datasets for the BigQuery dataset
 resource "google_bigquery_dataset_iam_member" "workflow_dataset_user" {
   project    = var.project_id
-  dataset_id = var.bq_dataset_id
+  dataset_id = google_bigquery_dataset.employment_analytics.dataset_id
   role       = "roles/bigquery.dataEditor"
   member     = local.sa_workflow
 }
 
-resource "google_bigquery_dataset_iam_member" "app_dataset_viewer" {
-  project    = var.project_id
-  dataset_id = var.bq_dataset_id
-  role       = "roles/bigquery.dataViewer"
-  member     = local.sa_app_account
-}
-
-
-
 # Configure the cloud storage bucket for our scraper job to send the data to.
 resource "google_storage_bucket" "ingestion_bucket" {
-  name = var.storage_bucket_name
-  location = var.region
+  name          = var.storage_bucket_name
+  location      = var.region
   storage_class = "STANDARD"
   force_destroy = false
   versioning {
     enabled = true
   }
+
+  depends_on = [google_project_service.storage]
 }
 
 # Configure the Cloud Run job to load data from bigquery to our private database.
 resource "google_cloud_run_v2_job" "loader_job" {
-  name = var.loader_job_name
+  name     = var.loader_job_name
   location = var.region
   template {
     task_count = 1
@@ -1201,35 +1385,35 @@ resource "google_cloud_run_v2_job" "loader_job" {
       service_account = "sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
       vpc_access {
         connector = google_vpc_access_connector.connector.id
-        egress = "PRIVATE_RANGES_ONLY"
+        egress    = "PRIVATE_RANGES_ONLY"
       }
       containers {
         image = var.loader_image
         env {
-          name = "BQ_PROJECT_ID"
+          name  = "BQ_PROJECT_ID"
           value = var.project_id
         }
         env {
-          name = "BQ_DATASET_ID"
+          name  = "BQ_DATASET_ID"
           value = var.bq_dataset_id
         }
         env {
-          name = "DB_HOST"
+          name  = "DB_HOST"
           value = google_sql_database_instance.private_db_instance.private_ip_address
         }
         env {
-          name = "DB_NAME"
+          name  = "DB_NAME"
           value = var.db_name
         }
         env {
-          name = "DB_USER"
+          name  = "DB_USER"
           value = var.db_user
         }
         env {
           name = "DB_PASSWORD"
           value_source {
             secret_key_ref {
-              secret  = google_secret_manager_secret.db_master_pwd.secret_id
+              secret  = google_secret_manager_secret.db_private_pwd.secret_id
               version = "latest"
             }
           }
@@ -1241,6 +1425,14 @@ resource "google_cloud_run_v2_job" "loader_job" {
   lifecycle {
     ignore_changes = [template[0].template[0].containers[0].image]
   }
+
+  depends_on = [
+    google_project_service.run,
+    google_bigquery_dataset_iam_member.loader_dataset_viewer,
+    google_secret_manager_secret_iam_member.bigquery_accessor,
+    google_vpc_access_connector.connector,
+    google_sql_database.database
+  ]
 }
 
 
@@ -1252,16 +1444,17 @@ resource "google_bigquery_dataset" "employment_analytics" {
   labels = {
     env = "dev"
   }
+  depends_on = [google_project_service.bigquery]
   access {
-    role = "READER"
+    role          = "READER"
     user_by_email = "sa-db-loader@${var.project_id}.iam.gserviceaccount.com"
   }
   access {
-    role = "WRITER"
+    role          = "WRITER"
     user_by_email = "sa-data-workflow@${var.project_id}.iam.gserviceaccount.com"
   }
   access {
-    role = "OWNER"
+    role          = "OWNER"
     user_by_email = "sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
   }
 }
@@ -1275,7 +1468,7 @@ resource "google_bigquery_table" "raw_tables" {
   deletion_protection = each.value.deletion_protection
   labels              = var.common_labels
 
-  schema = each.value.schema_path != null ? file(each.value.schema_path) : null
+  schema     = each.value.schema_path != null ? file(each.value.schema_path) : null
   clustering = length(each.value.clustering) > 0 ? each.value.clustering : null
 
   dynamic "time_partitioning" {
@@ -1296,7 +1489,7 @@ resource "google_bigquery_table" "transformed_tables" {
   deletion_protection = each.value.deletion_protection
   labels              = var.common_labels
 
-  schema = each.value.schema_path != null ? file(each.value.schema_path) : null
+  schema     = each.value.schema_path != null ? file(each.value.schema_path) : null
   clustering = length(each.value.clustering) > 0 ? each.value.clustering : null
 
   dynamic "time_partitioning" {
@@ -1312,10 +1505,10 @@ resource "google_bigquery_table" "transformed_tables" {
 # Stored procedures called by the Workflow transform step.
 # Full transformation SQL to be developed alongside the Python backend.
 resource "google_bigquery_routine" "sp_transform_bls" {
-  dataset_id   = google_bigquery_dataset.employment_analytics.dataset_id
-  routine_id   = "sp_transform_bls"
-  routine_type = "PROCEDURE"
-  language     = "SQL"
+  dataset_id      = google_bigquery_dataset.employment_analytics.dataset_id
+  routine_id      = "sp_transform_bls"
+  routine_type    = "PROCEDURE"
+  language        = "SQL"
   definition_body = <<-SQL
     BEGIN
       -- 1. Populate dim_source_system
@@ -1399,14 +1592,14 @@ resource "google_bigquery_routine" "sp_transform_bls" {
         VALUES (S.labor_observation_id, S.bls_series_id, S.time_id, S.source_id, S.metric_id, S.observation_value, S.observation_date);
     END
   SQL
-  depends_on = [google_bigquery_table.transformed_tables]
+  depends_on      = [google_bigquery_table.transformed_tables]
 }
 
 resource "google_bigquery_routine" "sp_transform_usajobs" {
-  dataset_id   = google_bigquery_dataset.employment_analytics.dataset_id
-  routine_id   = "sp_transform_usajobs"
-  routine_type = "PROCEDURE"
-  language     = "SQL"
+  dataset_id      = google_bigquery_dataset.employment_analytics.dataset_id
+  routine_id      = "sp_transform_usajobs"
+  routine_type    = "PROCEDURE"
+  language        = "SQL"
   definition_body = <<-SQL
     BEGIN
       -- 1. Populate dim_source_system
@@ -1478,14 +1671,14 @@ resource "google_bigquery_routine" "sp_transform_usajobs" {
                 S.posted_date);
     END
   SQL
-  depends_on = [google_bigquery_table.transformed_tables]
+  depends_on      = [google_bigquery_table.transformed_tables]
 }
 
 resource "google_bigquery_routine" "sp_transform_adzuna" {
-  dataset_id   = google_bigquery_dataset.employment_analytics.dataset_id
-  routine_id   = "sp_transform_adzuna"
-  routine_type = "PROCEDURE"
-  language     = "SQL"
+  dataset_id      = google_bigquery_dataset.employment_analytics.dataset_id
+  routine_id      = "sp_transform_adzuna"
+  routine_type    = "PROCEDURE"
+  language        = "SQL"
   definition_body = <<-SQL
     BEGIN
       -- 1. Populate dim_source_system
@@ -1552,7 +1745,7 @@ resource "google_bigquery_routine" "sp_transform_adzuna" {
                 S.posted_date);
     END
   SQL
-  depends_on = [google_bigquery_table.transformed_tables]
+  depends_on      = [google_bigquery_table.transformed_tables]
 }
 
 # Cloud Build Triggers
@@ -1573,7 +1766,10 @@ resource "google_cloudbuild_trigger" "scraper_trigger" {
   included_files = ["scraper/**"]
   filename       = "scraper/cloudbuild.yaml"
 
-  depends_on = [google_project_service.cloudbuild]
+  depends_on = [
+    google_project_service.cloudbuild,
+    google_service_account_iam_member.cloudbuild_access_scraper_agent
+  ]
 }
 
 resource "google_cloudbuild_trigger" "loader_trigger" {
@@ -1592,7 +1788,10 @@ resource "google_cloudbuild_trigger" "loader_trigger" {
   included_files = ["loader/**"]
   filename       = "loader/cloudbuild.yaml"
 
-  depends_on = [google_project_service.cloudbuild]
+  depends_on = [
+    google_project_service.cloudbuild,
+    google_service_account_iam_member.cloudbuild_access_loader_agent
+  ]
 }
 
 resource "google_cloudbuild_trigger" "streamlit_trigger" {
@@ -1611,5 +1810,8 @@ resource "google_cloudbuild_trigger" "streamlit_trigger" {
   included_files = ["streamlit/**"]
   filename       = "streamlit/cloudbuild.yaml"
 
-  depends_on = [google_project_service.cloudbuild]
+  depends_on = [
+    google_project_service.cloudbuild,
+    google_service_account_iam_member.cloudbuild_access_application_agent
+  ]
 }

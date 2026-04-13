@@ -12,14 +12,13 @@ steps:
       - 'streamlit'
     waitFor: ['-']
 
-  # Step 2 - Push the immutable tag chosen for this build
+  # Step 2 - Push the mutable latest tag for this build
   - name: 'gcr.io/cloud-builders/docker'
     id: push
     args: ['push', '$_IMAGE_URI:${_TAG}']
     waitFor: ['build']
 
-  # Step 3 - Optional deploy. Default is disabled so image builds are decoupled
-  # from Cloud Run readiness and service-account bindings.
+  # Step 3 - Deploy the Streamlit Cloud Run service after a successful image push.
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     id: deploy
     entrypoint: bash
@@ -39,8 +38,8 @@ steps:
     waitFor: ['push']
 
 substitutions:
-  _DEPLOY: 'false'
-  _TAG: 'manual'
+  _DEPLOY: 'true'
+  _TAG: 'latest'
   _IMAGE_URI: 'us-west2-docker.pkg.dev/nazimz-database/streamlit-docker-img/streamlit'
   _REGION: 'us-west2'
   _SERVICE_NAME: 'streamlit-app-service'

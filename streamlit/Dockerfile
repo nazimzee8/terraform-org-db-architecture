@@ -16,4 +16,5 @@ RUN python -m compileall -q /app /app/lib
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN python -c "import app; print('[preflight] OK')"
 ENTRYPOINT ["python", "-m", "streamlit", "run", "app.py", \
-            "--server.port=8080", "--server.address=0.0.0.0"]
+            "--server.port=8080", "--server.address=0.0.0.0", \
+            "--global.developmentMode=false"]

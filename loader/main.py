@@ -18,15 +18,16 @@ def main() -> int:
 
     try:
         print(f"Querying BigQuery for {raw_table}...")
-        rows = bq_reader.read(project, dataset, raw_table)
-        print(f"BigQuery returned {len(rows)} rows")
+        snapshot = bq_reader.read(project, dataset, raw_table)
+        total_rows = sum(len(rows) for rows in snapshot.values())
+        print(f"BigQuery returned {total_rows} rows across {len(snapshot)} serving tables")
     except Exception as exc:
         print(f"ERROR [BigQuery read]: {exc}", file=sys.stderr)
         return 1
 
     try:
-        print(f"Writing {len(rows)} rows to Cloud SQL ({db_host}/{db_name})...")
-        written = sql_writer.write(db_host, db_name, db_user, db_password, raw_table, rows)
+        print(f"Writing {total_rows} rows to Cloud SQL ({db_host}/{db_name})...")
+        written = sql_writer.write(db_host, db_name, db_user, db_password, raw_table, snapshot)
         print(f"Loader complete: {written} rows upserted")
     except Exception as exc:
         print(f"ERROR [Cloud SQL write]: {exc}", file=sys.stderr)

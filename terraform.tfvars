@@ -1,10 +1,10 @@
-project_id            = "nazimz-database"
-region                = "us-west2"
-storage_bucket_name   = "nazimz-db-bucket"
-workflow_name         = "nazimz-etl-workflow"
-bq_dataset_id         = "employment_analytics"
-bq_load_job_id        = "bq-load-job"
-bq_query_job_id       = "bq-query-job"
+project_id          = "nazimz-database"
+region              = "us-west2"
+storage_bucket_name = "nazimz-db-bucket"
+workflow_name       = "nazimz-etl-workflow"
+bq_dataset_id       = "employment_analytics"
+bq_load_job_id      = "bq-load-job"
+bq_query_job_id     = "bq-query-job"
 common_labels = {
   env        = "dev"
   system     = "employment-pipeline"
@@ -39,7 +39,7 @@ bq_raw_tables = {
   }
 }
 bq_transformed_tables = {
-    dim_source_system = {
+  dim_source_system = {
     deletion_protection = true
     schema_path         = "schemas/dim_source_system.json"
   }
@@ -111,16 +111,16 @@ bq_transformed_tables = {
   }
 }
 
-db_name = "nazimz-private-sql-db"
-db_user = "nazimz"
-app_service_image     = "us-west2-docker.pkg.dev/nazimz-database/streamlit-docker-img/streamlit:latest"
-app_service_name      = "streamlit-app-service"
-scraper_job_name      = "monthly-scraper-job"
-scraper_image         = "us-west2-docker.pkg.dev/nazimz-database/scraper-docker-img/scraper:latest"
-loader_job_name       = "monthly-loader-job"
-loader_image          = "us-west2-docker.pkg.dev/nazimz-database/loader-docker-img/loader:latest"
-adzuna_country        = "us"
-keywords              = ""   # populated dynamically; env var KEYWORDS set from join of keywords_list
-enable_cloudsql       = true
-github_owner          = "nazimzee8"
-github_repo           = "terraform-org-db-architecture"
+db_name           = "nazimz-private-sql-db"
+db_user           = "nazimz"
+app_service_image = "us-west2-docker.pkg.dev/nazimz-database/streamlit-docker-img/streamlit:latest"
+app_service_name  = "streamlit-app-service"
+scraper_job_name  = "monthly-scraper-job"
+scraper_image     = "us-west2-docker.pkg.dev/nazimz-database/scraper-docker-img/scraper:latest"
+loader_job_name   = "monthly-loader-job"
+loader_image      = "us-west2-docker.pkg.dev/nazimz-database/loader-docker-img/loader:latest"
+adzuna_country    = "us"
+keywords          = "" # populated dynamically; env var KEYWORDS set from join of keywords_list
+enable_cloudsql   = true
+github_owner      = "nazimzee8"
+github_repo       = "terraform-org-db-architecture"

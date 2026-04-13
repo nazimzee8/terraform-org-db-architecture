@@ -5,13 +5,26 @@ import os
 
 import altair as alt
 import pandas as pd
+import pymysql
+import pymysql.cursors
 import streamlit as st
-from google.cloud import bigquery
 
 APP_TITLE = 'Employment Atlas'
-DEFAULT_DATASET = 'employment_analytics'
+DEFAULT_DB_PORT = 3306
 LABOR_LOOKBACK_MONTHS = 24
 POSTING_LOOKBACK_MONTHS = 18
+NUMERIC_RESULT_COLUMNS = {
+    'value',
+    'observations',
+    'previous_value',
+    'year_ago_value',
+    'postings',
+    'avg_salary_mid',
+    'clearance_postings',
+    'remote_postings',
+}
+DATE_RESULT_COLUMNS = {'month'}
+
 NAV_ITEMS = [
     ('Introduction', 'introduction'),
     ('Key Insights', 'key-insights'),
@@ -23,24 +36,48 @@ NAV_ITEMS = [
 ]
 
 
-def resolve_project_id() -> str | None:
-    return os.getenv('BQ_PROJECT_ID') or os.getenv('GOOGLE_CLOUD_PROJECT') or os.getenv('GCP_PROJECT')
-
-
-@st.cache_resource(show_spinner=False)
-def get_bq_client() -> bigquery.Client:
-    project_id = resolve_project_id()
-    return bigquery.Client(project=project_id) if project_id else bigquery.Client()
-
-
-def resolve_dataset_id() -> str:
-    return os.getenv('BQ_DATASET_ID') or DEFAULT_DATASET
+def resolve_db_config() -> dict[str, object]:
+    missing = [name for name in ('DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD') if not os.getenv(name)]
+    if missing:
+        raise RuntimeError(f'Missing Cloud SQL environment variables: {", ".join(missing)}')
+    return {
+        'host': os.environ['DB_HOST'],
+        'port': int(os.getenv('DB_PORT', str(DEFAULT_DB_PORT))),
+        'database': os.environ['DB_NAME'],
+        'user': os.environ['DB_USER'],
+        'password': os.environ['DB_PASSWORD'],
+    }
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def run_query(sql: str, project_id: str, dataset_id: str) -> pd.DataFrame:
-    rows = get_bq_client().query(sql).result()
-    return pd.DataFrame([dict(r) for r in rows])
+def run_query(sql: str, params: tuple[object, ...] = ()) -> pd.DataFrame:
+    config = resolve_db_config()
+    conn = pymysql.connect(
+        host=str(config['host']),
+        port=int(config['port']),
+        user=str(config['user']),
+        password=str(config['password']),
+        database=str(config['database']),
+        charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=10,
+        read_timeout=30,
+        write_timeout=30,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return normalize_query_frame(pd.DataFrame(cur.fetchall()))
+    finally:
+        conn.close()
+
+
+def normalize_query_frame(df: pd.DataFrame) -> pd.DataFrame:
+    for column in DATE_RESULT_COLUMNS.intersection(df.columns):
+        df[column] = pd.to_datetime(df[column], errors='coerce')
+    for column in NUMERIC_RESULT_COLUMNS.intersection(df.columns):
+        df[column] = pd.to_numeric(df[column], errors='coerce')
+    return df
 
 
 def escape(value: object, fallback: str = 'n/a') -> str:
@@ -92,6 +129,15 @@ def fmt_signed(value: object, suffix: str = '', fallback: str = 'n/a') -> str:
         return fallback
 
 
+def fmt_date(value: object, fallback: str = 'n/a') -> str:
+    try:
+        if value is None or pd.isna(value):
+            return fallback
+        return pd.to_datetime(value).date().isoformat()
+    except Exception:
+        return fallback
+
+
 def weighted_average(df: pd.DataFrame, value_col: str, weight_col: str) -> float | None:
     frame = df[[value_col, weight_col]].dropna()
     if frame.empty:
@@ -107,20 +153,20 @@ def empty_frame(columns: list[str]) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def load_labor_monthly(project_id: str, dataset_id: str, months: int = LABOR_LOOKBACK_MONTHS) -> pd.DataFrame:
-    sql = f"""
+def load_labor_monthly(months: int = LABOR_LOOKBACK_MONTHS) -> pd.DataFrame:
+    sql = """
     WITH monthly AS (
       SELECT
-        DATE_TRUNC(f.observation_date, MONTH) AS month,
-        COALESCE(NULLIF(TRIM(s.supersector_code), ''), 'ALL') AS sector_code,
-        COALESCE(NULLIF(TRIM(m.metric_name), ''), f.metric_id) AS metric_name,
-        COALESCE(NULLIF(TRIM(m.metric_category), ''), f.metric_id) AS metric_category,
-        AVG(CAST(f.observation_value AS FLOAT64)) AS value,
+        CAST(DATE_FORMAT(f.observation_date, '%%Y-%%m-01') AS DATE) AS month,
+        COALESCE(NULLIF(TRIM(s.supersector_code), ''), NULLIF(TRIM(f.supersector_code), ''), 'ALL') AS sector_code,
+        COALESCE(NULLIF(TRIM(m.metric_name), ''), NULLIF(TRIM(f.metric_id), ''), 'Other') AS metric_name,
+        COALESCE(NULLIF(TRIM(m.metric_category), ''), NULLIF(TRIM(f.metric_id), ''), 'OTHER') AS metric_category,
+        AVG(CAST(f.observation_value AS DECIMAL(18, 4))) AS value,
         COUNT(*) AS observations
-      FROM `{project_id}.{dataset_id}.fact_labor_observation` f
-      LEFT JOIN `{project_id}.{dataset_id}.curated_bls_series` s ON f.bls_series_id = s.bls_series_id
-      LEFT JOIN `{project_id}.{dataset_id}.curated_labor_metric` m ON f.metric_id = m.metric_id
-      WHERE f.observation_date >= DATE_SUB(CURRENT_DATE(), INTERVAL {months} MONTH)
+      FROM fact_labor_observation f
+      LEFT JOIN curated_bls_series s ON f.bls_series_id = s.bls_series_id
+      LEFT JOIN curated_labor_metric m ON COALESCE(s.metric_id, f.metric_id) = m.metric_id
+      WHERE f.observation_date >= DATE_SUB(CURDATE(), INTERVAL %s MONTH)
       GROUP BY 1, 2, 3, 4
     )
     SELECT
@@ -130,45 +176,45 @@ def load_labor_monthly(project_id: str, dataset_id: str, months: int = LABOR_LOO
     FROM monthly
     ORDER BY month, sector_code, metric_name
     """
-    return run_query(sql, project_id, dataset_id)
+    return run_query(sql, (months,))
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def load_postings_rollup(project_id: str, dataset_id: str, months: int = POSTING_LOOKBACK_MONTHS) -> pd.DataFrame:
-    sql = f"""
+def load_postings_rollup(months: int = POSTING_LOOKBACK_MONTHS) -> pd.DataFrame:
+    sql = """
     WITH base AS (
       SELECT
-        DATE_TRUNC(f.posted_date, MONTH) AS month,
+        CAST(DATE_FORMAT(f.posted_date, '%%Y-%%m-01') AS DATE) AS month,
         COALESCE(NULLIF(TRIM(f.source_id), ''), 'unknown') AS source_id,
-        COALESCE(NULLIF(TRIM(di.industry_name), ''), NULLIF(TRIM(f.industry_id), ''), 'Unmapped') AS industry_label,
-        COALESCE(NULLIF(TRIM(do.occupation_title), ''), NULLIF(TRIM(f.occupation_id), ''), 'Unmapped') AS occupation_label,
+        COALESCE(NULLIF(TRIM(i.industry_name), ''), NULLIF(TRIM(f.industry_id), ''), 'Unmapped') AS industry_label,
+        COALESCE(NULLIF(TRIM(o.occupation_title), ''), NULLIF(TRIM(f.occupation_id), ''), 'Unmapped') AS occupation_label,
         COALESCE(NULLIF(TRIM(f.remote_type), ''), 'Unknown') AS remote_type,
         COALESCE(NULLIF(TRIM(f.work_schedule), ''), 'Unknown') AS work_schedule,
-        COALESCE(dl.state_code, 'Unknown') AS state_code,
+        COALESCE(NULLIF(TRIM(l.state_code), ''), 'Unknown') AS state_code,
         CASE
-          WHEN f.salary_min IS NOT NULL AND f.salary_max IS NOT NULL THEN (SAFE_CAST(f.salary_min AS FLOAT64) + SAFE_CAST(f.salary_max AS FLOAT64)) / 2
-          WHEN f.salary_min IS NOT NULL THEN SAFE_CAST(f.salary_min AS FLOAT64)
-          WHEN f.salary_max IS NOT NULL THEN SAFE_CAST(f.salary_max AS FLOAT64)
+          WHEN f.salary_min IS NOT NULL AND f.salary_max IS NOT NULL THEN (CAST(f.salary_min AS DECIMAL(18, 4)) + CAST(f.salary_max AS DECIMAL(18, 4))) / 2
+          WHEN f.salary_min IS NOT NULL THEN CAST(f.salary_min AS DECIMAL(18, 4))
+          WHEN f.salary_max IS NOT NULL THEN CAST(f.salary_max AS DECIMAL(18, 4))
           ELSE NULL
         END AS salary_mid,
-        IF(f.security_clearance_required, 1, 0) AS clearance_flag,
-        IF(LOWER(COALESCE(f.remote_type, '')) LIKE '%remote%', 1, 0) AS remote_flag
-      FROM `{project_id}.{dataset_id}.fact_job_posting` f
-      LEFT JOIN `{project_id}.{dataset_id}.dim_industry` di ON f.industry_id = di.industry_id
-      LEFT JOIN `{project_id}.{dataset_id}.dim_occupation` do ON f.occupation_id = do.occupation_id
-      LEFT JOIN `{project_id}.{dataset_id}.dim_location` dl ON f.location_id = dl.location_id
-      WHERE f.posted_date >= DATE_SUB(CURRENT_DATE(), INTERVAL {months} MONTH)
+        CASE WHEN f.security_clearance_required THEN 1 ELSE 0 END AS clearance_flag,
+        CASE WHEN LOWER(COALESCE(f.remote_type, '')) LIKE '%%remote%%' THEN 1 ELSE 0 END AS remote_flag
+      FROM fact_job_posting f
+      LEFT JOIN dim_industry i ON f.industry_id = i.industry_id
+      LEFT JOIN dim_occupation o ON f.occupation_id = o.occupation_id
+      LEFT JOIN dim_location l ON f.location_id = l.location_id
+      WHERE f.posted_date >= DATE_SUB(CURDATE(), INTERVAL %s MONTH)
     )
     SELECT
       month, source_id, industry_label, occupation_label, remote_type, work_schedule, state_code,
       COUNT(*) AS postings, AVG(salary_mid) AS avg_salary_mid,
-      COUNTIF(clearance_flag = 1) AS clearance_postings,
-      COUNTIF(remote_flag = 1) AS remote_postings
+      SUM(clearance_flag) AS clearance_postings,
+      SUM(remote_flag) AS remote_postings
     FROM base
     GROUP BY 1, 2, 3, 4, 5, 6, 7
     ORDER BY month, postings DESC
     """
-    return run_query(sql, project_id, dataset_id)
+    return run_query(sql, (months,))
 
 
 def safe_load(loader, empty_columns: list[str]) -> tuple[pd.DataFrame, str | None]:
@@ -394,16 +440,16 @@ def render_hero(snapshot: dict[str, object]) -> None:
       <div>
         <div class="kicker">Employment intelligence</div>
         <div class="hero-title">A labor-market story built from official statistics and live job demand.</div>
-        <div class="hero-text">This dashboard is BigQuery-first. It combines BLS labor observations, job-posting intake, and the existing Cloud Run / Eventarc / Workflows pipeline into a single narrative view for job seekers, operators, and policymakers.</div>
+        <div class="hero-text">This dashboard is served from Cloud SQL. The ETL path uses BLS labor observations, job-posting intake, Cloud Run, Eventarc, Workflows, and BigQuery transforms before the serving tables power the narrative view.</div>
         <div class="hero-text">Use the anchored navigation to jump between the introduction, key insights, and analytics sections. If a mapped dimension is missing, the app will show the gap rather than inventing a sector label.</div>
       </div>
       <div class="architecture-card">
         <div class="kicker">Pipeline</div>
         <div style="display:grid;gap:0.65rem;margin-top:0.8rem;">
           <div class="pipeline-step"><span>1. Source intake</span><span>BLS + job posts</span></div>
-          <div class="pipeline-step"><span>2. BigQuery marts</span><span>Monthly analytics</span></div>
-          <div class="pipeline-step"><span>3. Streamlit presentation</span><span>Anchored narrative</span></div>
-          <div class="pipeline-step"><span>4. Default auth</span><span>Google credentials</span></div>
+          <div class="pipeline-step"><span>2. BigQuery transforms</span><span>Modeled facts</span></div>
+          <div class="pipeline-step"><span>3. Cloud SQL serving</span><span>Private MySQL</span></div>
+          <div class="pipeline-step"><span>4. Streamlit presentation</span><span>Cloud Run</span></div>
         </div>
       </div>
     </div>
@@ -572,20 +618,20 @@ def render_salary_section(postings: pd.DataFrame) -> None:
 
 
 
-def render_methodology(labor: pd.DataFrame, postings: pd.DataFrame, project_id: str, dataset_id: str, errors: dict[str, str]) -> None:
-    st.markdown('<div id="methodology"></div><div class="section-shell"><div class="kicker">Methodology</div><h2 class="section-title">How the dashboard is assembled</h2><div class="section-subtitle">The app reads from BigQuery using default Google credentials. It prefers modeled tables and joins to dimensions when they exist, but it keeps the raw labels visible if the bridge has not been populated yet.</div>', unsafe_allow_html=True)
+def render_methodology(labor: pd.DataFrame, postings: pd.DataFrame, db_host: str, db_name: str, errors: dict[str, str]) -> None:
+    st.markdown('<div id="methodology"></div><div class="section-shell"><div class="kicker">Methodology</div><h2 class="section-title">How the dashboard is assembled</h2><div class="section-subtitle">The app reads from Cloud SQL over the private VPC path. The serving tables are loaded from the BigQuery transformation layer, and unmapped labels remain explicit while the warehouse bridges mature.</div>', unsafe_allow_html=True)
     stat_cards([
-        {'label': 'Labor freshness', 'value': escape(labor['month'].max().date() if not labor.empty else 'n/a'), 'note': f'Rows: {fmt_int(len(labor))}'},
-        {'label': 'Posting freshness', 'value': escape(postings['month'].max().date() if not postings.empty else 'n/a'), 'note': f'Rows: {fmt_int(len(postings))}'},
+        {'label': 'Labor freshness', 'value': fmt_date(labor['month'].max() if not labor.empty else None), 'note': f'Rows: {fmt_int(len(labor))}'},
+        {'label': 'Posting freshness', 'value': fmt_date(postings['month'].max() if not postings.empty else None), 'note': f'Rows: {fmt_int(len(postings))}'},
         {'label': 'Sector coverage', 'value': fmt_int(labor['sector_code'].nunique() if not labor.empty else 0), 'note': 'Unique sector codes in the BLS rollup'},
         {'label': 'State coverage', 'value': fmt_int(postings['state_code'].replace('Unknown', pd.NA).dropna().nunique() if not postings.empty else 0), 'note': 'States surfaced from the posting stream'},
     ])
-    st.markdown(f'<div style="margin-top: 1rem;"><span class="mini-pill">BigQuery project: {escape(project_id)}</span><span class="mini-pill">Dataset: {escape(dataset_id)}</span><span class="mini-pill">Default auth</span><span class="mini-pill">Narrative layout</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="margin-top: 1rem;"><span class="mini-pill">Cloud SQL host: {escape(db_host)}</span><span class="mini-pill">Database: {escape(db_name)}</span><span class="mini-pill">Private MySQL serving</span><span class="mini-pill">Cloud Run VPC connector</span></div>', unsafe_allow_html=True)
     if errors:
         st.warning('Some datasets could not be queried. The app will keep rendering with the data that is available.')
         for label, message in errors.items():
             st.caption(f'{label}: {message}')
-    st.markdown('<div style="margin-top: 1rem; color: #715743; line-height: 1.65;">The current warehouse model can support labor trends, posting demand, salaries, work conditions, and location coverage. Sector-level comparisons become stronger once the industry bridge and the sector mapping are fully populated, so the dashboard keeps unmapped values explicit instead of fabricating labels.</div>', unsafe_allow_html=True)
+    st.markdown('<div style="margin-top: 1rem; color: #715743; line-height: 1.65;">The warehouse model feeds the Cloud SQL serving tables for labor trends, posting demand, salaries, work conditions, industry labels, occupation labels, and location coverage.</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -594,17 +640,29 @@ def main() -> None:
     st.set_page_config(page_title=APP_TITLE, page_icon=':briefcase:', layout='wide', initial_sidebar_state='collapsed')
     render_css()
     render_nav()
-    project_id = resolve_project_id() or get_bq_client().project
-    dataset_id = resolve_dataset_id()
     labor_cols = ['month', 'sector_code', 'metric_name', 'metric_category', 'value', 'observations', 'previous_value', 'year_ago_value']
     posting_cols = ['month', 'source_id', 'industry_label', 'occupation_label', 'remote_type', 'work_schedule', 'state_code', 'postings', 'avg_salary_mid', 'clearance_postings', 'remote_postings']
-    labor, labor_error = safe_load(lambda: load_labor_monthly(project_id, dataset_id), labor_cols) if project_id else (empty_frame(labor_cols), 'BigQuery project could not be resolved from default credentials or env vars.')
-    postings, postings_error = safe_load(lambda: load_postings_rollup(project_id, dataset_id), posting_cols) if project_id else (empty_frame(posting_cols), 'BigQuery project could not be resolved from default credentials or env vars.')
     errors: dict[str, str] = {}
-    if labor_error:
-        errors['labor'] = labor_error
-    if postings_error:
-        errors['postings'] = postings_error
+    try:
+        db_config = resolve_db_config()
+        db_host = str(db_config['host'])
+        db_name = str(db_config['database'])
+    except Exception as exc:
+        db_host = 'unknown'
+        db_name = 'unknown'
+        errors['database'] = str(exc)
+
+    if errors:
+        labor = empty_frame(labor_cols)
+        postings = empty_frame(posting_cols)
+    else:
+        labor, labor_error = safe_load(lambda: load_labor_monthly(), labor_cols)
+        postings, postings_error = safe_load(lambda: load_postings_rollup(), posting_cols)
+        if labor_error:
+            errors['labor'] = labor_error
+        if postings_error:
+            errors['postings'] = postings_error
+
     snapshot = build_snapshot(labor, postings)
     render_hero(snapshot)
     render_key_insights(build_job_seeker_insights(labor, postings, snapshot), build_policy_insights(labor, postings, snapshot))
@@ -612,7 +670,7 @@ def main() -> None:
     render_posting_section(postings)
     render_market_tension(labor, postings, snapshot)
     render_salary_section(postings)
-    render_methodology(labor, postings, project_id or 'unknown', dataset_id, errors)
+    render_methodology(labor, postings, db_host, db_name, errors)
 
 
 if __name__ == '__main__':
