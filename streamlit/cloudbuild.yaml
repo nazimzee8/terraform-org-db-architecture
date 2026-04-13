@@ -25,13 +25,14 @@ steps:
     args:
       - -c
       - |
-        if [[ "${_DEPLOY,,}" != "true" ]]; then
+        if [[ "${_DEPLOY}" != "true" && "${_DEPLOY}" != "TRUE" ]]; then
           echo "Skipping Cloud Run deploy because _DEPLOY=${_DEPLOY}."
           exit 0
         fi
         gcloud run services update "${_SERVICE_NAME}" \
           --image="${_IMAGE_URI}:latest" \
           --region="${_REGION}" \
+          --revision-suffix="rev-${SHORT_SHA}" \
           --min-instances=1 \
           --cpu-boost \
           --no-cpu-throttling
