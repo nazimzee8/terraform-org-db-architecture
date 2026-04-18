@@ -25,7 +25,9 @@ if (-not $TerraformBin) {
   $TerraformBin = Resolve-Bin "terraform" "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Hashicorp.Terraform_Microsoft.Winget.Source_8wekyb3d8bbwe\terraform.exe"
 }
 $GcloudBin = Resolve-Bin "gcloud.cmd"
+if (-not $GcloudBin) { $GcloudBin = Resolve-Bin "gcloud" }
 $BqBin = Resolve-Bin "bq.cmd"
+if (-not $BqBin) { $BqBin = Resolve-Bin "bq" }
 
 if (-not $TerraformBin) { throw "Terraform was not found. Set TERRAFORM_BIN to terraform.exe." }
 if (-not $GcloudBin) { throw "gcloud.cmd was not found. Install Google Cloud CLI first." }
