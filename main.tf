@@ -1751,9 +1751,10 @@ resource "google_bigquery_routine" "sp_transform_adzuna" {
 # Cloud Build Triggers
 
 resource "google_cloudbuild_trigger" "scraper_trigger" {
-  name     = "scraper-build-deploy"
-  location = "global"
-  project  = var.project_id
+  name            = "scraper-build-deploy"
+  location        = "global"
+  project         = var.project_id
+  service_account = "projects/${var.project_id}/serviceAccounts/${local.sa_app_deployer_email}"
 
   github {
     owner = var.github_owner
@@ -1773,9 +1774,10 @@ resource "google_cloudbuild_trigger" "scraper_trigger" {
 }
 
 resource "google_cloudbuild_trigger" "loader_trigger" {
-  name     = "loader-build-deploy"
-  location = "global"
-  project  = var.project_id
+  name            = "loader-build-deploy"
+  location        = "global"
+  project         = var.project_id
+  service_account = "projects/${var.project_id}/serviceAccounts/${local.sa_app_deployer_email}"
 
   github {
     owner = var.github_owner
@@ -1795,9 +1797,10 @@ resource "google_cloudbuild_trigger" "loader_trigger" {
 }
 
 resource "google_cloudbuild_trigger" "streamlit_trigger" {
-  name     = "streamlit-build-deploy"
-  location = "global"
-  project  = var.project_id
+  name            = "streamlit-build-deploy"
+  location        = "global"
+  project         = var.project_id
+  service_account = "projects/${var.project_id}/serviceAccounts/${local.sa_app_deployer_email}"
 
   github {
     owner = var.github_owner
