@@ -1191,7 +1191,7 @@ resource "google_workflows_workflow" "etl_workflow" {
           next: unsupported_file
 
       - unsupported_file:
-          raise: $${"Unsupported object path: " + object_name}
+          raise: '$${"Unsupported object path: " + object_name}'
 
       - set_bls_config:
           assign:
