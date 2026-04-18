@@ -1178,7 +1178,7 @@ resource "google_workflows_workflow" "etl_workflow" {
       - validate_bucket:
           switch:
             - condition: $${bucket != expected_bucket}
-              raise: $${"Unexpected bucket received: " + bucket}
+              raise: '$${"Unexpected bucket received: " + bucket}'
 
       - route_file:
           switch:
@@ -1752,7 +1752,7 @@ resource "google_bigquery_routine" "sp_transform_adzuna" {
 
 resource "google_cloudbuild_trigger" "scraper_trigger" {
   name     = "scraper-build-deploy"
-  location = var.region
+  location = "global"
   project  = var.project_id
 
   github {
@@ -1774,7 +1774,7 @@ resource "google_cloudbuild_trigger" "scraper_trigger" {
 
 resource "google_cloudbuild_trigger" "loader_trigger" {
   name     = "loader-build-deploy"
-  location = var.region
+  location = "global"
   project  = var.project_id
 
   github {
@@ -1796,7 +1796,7 @@ resource "google_cloudbuild_trigger" "loader_trigger" {
 
 resource "google_cloudbuild_trigger" "streamlit_trigger" {
   name     = "streamlit-build-deploy"
-  location = var.region
+  location = "global"
   project  = var.project_id
 
   github {
