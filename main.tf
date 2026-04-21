@@ -967,6 +967,20 @@ resource "google_artifact_registry_repository_iam_member" "loader_writer" {
   member     = local.sa_app_deployer
 }
 
+# Enable deployer agent to act as scraper job SA (required for gcloud run jobs update)
+resource "google_service_account_iam_member" "deployer_acts_as_scraper" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${local.sa_scraper_email}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = local.sa_app_deployer
+}
+
+# Enable deployer agent to act as loader job SA (required for gcloud run jobs update)
+resource "google_service_account_iam_member" "deployer_acts_as_loader" {
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${local.sa_loader_email}"
+  role               = "roles/iam.serviceAccountUser"
+  member             = local.sa_app_deployer
+}
+
 # Enable deployer agent to run the Cloud Run service for streamlit app
 resource "google_cloud_run_v2_service_iam_member" "deployer_runs_service" {
   project  = var.project_id
