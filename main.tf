@@ -282,7 +282,8 @@ locals {
     )
 
     (local.sa_app_deployer) = [
-      "roles/cloudbuild.editor"
+      "roles/cloudbuild.editor",
+      "roles/logging.logWriter"
     ]
 
     (local.sa_cloudbuild) = [
