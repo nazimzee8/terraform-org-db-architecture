@@ -760,8 +760,9 @@ resource "google_sql_database_instance" "private_db_instance" {
 
 # Configure the service to host the streamlit application.
 resource "google_cloud_run_v2_service" "streamlit-app" {
-  name     = var.app_service_name
-  location = var.region
+  name                = var.app_service_name
+  location            = var.region
+  deletion_protection = false
 
   template {
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
@@ -969,8 +970,9 @@ resource "google_compute_firewall" "enable_traffic_to_db" {
 
 # Configure the Cloud Run job to scrape data from the Internet.
 resource "google_cloud_run_v2_job" "scraper_job" {
-  name     = var.scraper_job_name
-  location = var.region
+  name                = var.scraper_job_name
+  location            = var.region
+  deletion_protection = false
   template {
     task_count = 1
     template {
@@ -1080,6 +1082,23 @@ resource "google_project_service" "eventarc" {
   service            = "eventarc.googleapis.com"
   disable_on_destroy = false
 }
+
+# Provision the Eventarc service agent so its email is available as a reference.
+resource "google_project_service_identity" "eventarc_agent" {
+  provider   = google-beta
+  project    = var.project_id
+  service    = "eventarc.googleapis.com"
+  depends_on = [google_project_service.eventarc]
+}
+
+# Eventarc service agent needs storage.buckets.get to validate the bucket when
+# creating a GCS-sourced trigger. roles/storage.legacyBucketReader covers this.
+resource "google_storage_bucket_iam_member" "eventarc_bucket_reader" {
+  bucket     = google_storage_bucket.ingestion_bucket.name
+  role       = "roles/storage.legacyBucketReader"
+  member     = "serviceAccount:${google_project_service_identity.eventarc_agent.email}"
+  depends_on = [google_project_service_identity.eventarc_agent]
+}
 # Allow Cloud Storage direct events to publish through Eventarc Pub/Sub transport.
 data "google_storage_project_service_account" "gcs_account" {
   project    = var.project_id
@@ -1125,6 +1144,7 @@ resource "google_eventarc_trigger" "bucket_trigger" {
     google_project_service.pubsub,
     google_project_iam_member.gcs_pubsub_publisher,
     google_storage_bucket_iam_member.event_bucket_retrieval,
+    google_storage_bucket_iam_member.eventarc_bucket_reader,
     google_workflows_workflow.etl_workflow
   ]
 }
@@ -1377,8 +1397,9 @@ resource "google_storage_bucket" "ingestion_bucket" {
 
 # Configure the Cloud Run job to load data from bigquery to our private database.
 resource "google_cloud_run_v2_job" "loader_job" {
-  name     = var.loader_job_name
-  location = var.region
+  name                = var.loader_job_name
+  location            = var.region
+  deletion_protection = false
   template {
     task_count = 1
     template {
