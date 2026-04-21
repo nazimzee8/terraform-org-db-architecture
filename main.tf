@@ -947,6 +947,24 @@ resource "google_artifact_registry_repository_iam_member" "viewer" {
   member     = local.sa_app_deployer
 }
 
+# Enable deployer agent to write docker image to scraper repo
+resource "google_artifact_registry_repository_iam_member" "scraper_writer" {
+  project    = var.project_id
+  location   = var.region
+  repository = google_artifact_registry_repository.scraper_repo.name
+  role       = "roles/artifactregistry.writer"
+  member     = local.sa_app_deployer
+}
+
+# Enable deployer agent to write docker image to loader repo
+resource "google_artifact_registry_repository_iam_member" "loader_writer" {
+  project    = var.project_id
+  location   = var.region
+  repository = google_artifact_registry_repository.loader_repo.name
+  role       = "roles/artifactregistry.writer"
+  member     = local.sa_app_deployer
+}
+
 # Enable deployer agent to run the Cloud Run service for streamlit app
 resource "google_cloud_run_v2_service_iam_member" "deployer_runs_service" {
   project  = var.project_id
