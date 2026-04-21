@@ -36,7 +36,7 @@ steps:
 
 substitutions:
   _DEPLOY: 'true'
-  _TAG: 'manual'
+  _TAG: 'latest'
   _IMAGE_URI: 'us-west2-docker.pkg.dev/nazimz-database/loader-docker-img/loader'
   _REGION: 'us-west2'
   _JOB_NAME: 'monthly-loader-job'
