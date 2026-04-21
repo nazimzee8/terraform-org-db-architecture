@@ -658,8 +658,11 @@ resource "google_compute_subnetwork" "connector_subnet" {
 
 # Create the VPC connector to connect our Cloud Run jobs to our VPC.
 resource "google_vpc_access_connector" "connector" {
-  name   = "nazimz-connector"
-  region = var.region
+  name           = "nazimz-connector"
+  region         = var.region
+  min_throughput = 200
+  max_throughput = 300
+
   subnet {
     name       = google_compute_subnetwork.connector_subnet.name
     project_id = var.project_id
