@@ -521,6 +521,13 @@ resource "google_storage_bucket_iam_member" "scraper_bucket_writer" {
   member = local.sa_scraper
 }
 
+# Role for scraper to list/read objects so GCSFuse can mount the bucket.
+resource "google_storage_bucket_iam_member" "scraper_bucket_reader" {
+  bucket = google_storage_bucket.ingestion_bucket.name
+  role   = "roles/storage.objectViewer"
+  member = local.sa_scraper
+}
+
 # Enable access to usajobs user email
 resource "google_secret_manager_secret_iam_member" "scraper_bls_key_accessor" {
   secret_id = google_secret_manager_secret.bls_api_key.secret_id
