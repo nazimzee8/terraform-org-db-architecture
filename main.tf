@@ -517,7 +517,7 @@ resource "google_secret_manager_secret" "db_private_pwd" {
 # Role for scraper to write data to our cloud storage bucket.
 resource "google_storage_bucket_iam_member" "scraper_bucket_writer" {
   bucket = google_storage_bucket.ingestion_bucket.name
-  role   = "roles/storage.objectCreator"
+  role   = "roles/storage.objectAdmin"
   member = local.sa_scraper
 }
 
@@ -1018,8 +1018,11 @@ resource "google_cloud_run_v2_job" "scraper_job" {
   location            = var.region
   deletion_protection = false
   template {
-    task_count = 1
+    task_count  = 3
+    parallelism = 3
     template {
+      timeout         = "3600s"
+      max_retries     = 0
       service_account = "sa-scraper-runjob@${var.project_id}.iam.gserviceaccount.com"
       vpc_access {
         connector = google_vpc_access_connector.connector.id
