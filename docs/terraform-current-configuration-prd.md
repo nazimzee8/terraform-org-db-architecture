@@ -183,3 +183,33 @@ cmd /c gcloud workflows describe nazimz-etl-workflow --location=us-west2 --proje
 cmd /c gcloud eventarc triggers describe gcs-bucket-trigger --location=us-west2 --project=nazimz-database
 cmd /c gcloud sql instances describe nazimz-private-sql-instance --project=nazimz-database
 ```
+
+## 8. Scraper Job Architecture and Operational Fixes
+
+### Parallel Task Execution (implemented)
+The scraper Cloud Run job runs three tasks in parallel using Cloud Run's native
+`task_count=3` / `parallelism=3` configuration. `CLOUD_RUN_TASK_INDEX` is injected
+automatically per task:
+
+| Task Index | Source  | Typical Duration |
+|------------|---------|-----------------|
+| 0          | BLS     | ~1 s            |
+| 1          | USAJobs | ~30 s           |
+| 2          | Adzuna  | ~20 min worst   |
+
+`scraper/main.py` dispatches on `CLOUD_RUN_TASK_INDEX`. Each task exits 0 on success,
+1 on error. Job timeout is 3600 s; max_retries is 0 (no wasted retries on timeout).
+
+### IAM
+`sa-scraper-runjob` holds `roles/storage.objectAdmin` on `nazimz-db-bucket`
+(upgraded from `objectCreator` to allow `storage.objects.delete` on retry/overwrite).
+
+### Adzuna Rate Limiting
+`scraper/adzuna_client.py` uses full-jitter exponential backoff on HTTP 429
+(base delay 60 s, doubles per retry, up to 3 retries) and a 1 s sleep between
+page requests. If retries are exhausted, the remaining pages for that keyword are
+skipped with a warning rather than aborting the task.
+
+### Cloud NAT
+Two static external IPs (`nat-ip-1`, `nat-ip-2`) are allocated and assigned to the
+NAT gateway (`MANUAL_ONLY`) to distribute egress across multiple source addresses.

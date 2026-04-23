@@ -687,16 +687,28 @@ resource "google_compute_router" "router" {
   network = google_compute_network.vpc_network.self_link
 }
 
+# Static external IPs for Cloud NAT (MANUAL_ONLY allocation)
+resource "google_compute_address" "nat_ip_1" {
+  name   = "nat-ip-1"
+  region = var.region
+}
+
+resource "google_compute_address" "nat_ip_2" {
+  name   = "nat-ip-2"
+  region = var.region
+}
+
 # Configure the Cloud NAT gateway
 resource "google_compute_router_nat" "nat_gateway" {
   name   = "nat-config"
   router = google_compute_router.router.name
   region = google_compute_router.router.region
 
-  # Automatically allocate external IP addresses
-  nat_ip_allocate_option = "AUTO_ONLY"
-
-  # CRITICAL FIX: Apply NAT to all subnets in the VPC
+  nat_ip_allocate_option = "MANUAL_ONLY"
+  nat_ips = [
+    google_compute_address.nat_ip_1.self_link,
+    google_compute_address.nat_ip_2.self_link,
+  ]
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 
   log_config {
