@@ -572,11 +572,13 @@ resource "google_bigquery_dataset_iam_member" "loader_dataset_viewer" {
 }
 
 # Enable workflow agent to run loader job after data transformation.
+# roles/run.developer is required (not run.invoker) because the workflow passes
+# container overrides (env vars), which requires run.jobs.runWithOverrides.
 resource "google_cloud_run_v2_job_iam_member" "workflow_invokes_loader" {
   project  = var.project_id
   location = var.region
   name     = google_cloud_run_v2_job.loader_job.name
-  role     = "roles/run.invoker"
+  role     = "roles/run.developer"
   member   = local.sa_workflow
 }
 
@@ -748,11 +750,36 @@ data "google_secret_manager_secret_version_access" "db_password" {
 }
 
 
-# Create user for the SQL database
+# Create user for the SQL database.
+# host = "%" covers TCP connections (loader from VPC).
+# host = "localhost" covers SQL Studio, which connects via the Cloud SQL proxy socket.
 resource "google_sql_user" "users" {
   name     = var.db_user
+  host     = "%"
   instance = google_sql_database_instance.private_db_instance.name
   password = data.google_secret_manager_secret_version_access.db_password.secret_data
+}
+
+resource "google_sql_user" "users_localhost" {
+  name     = var.db_user
+  host     = "localhost"
+  instance = google_sql_database_instance.private_db_instance.name
+  password = data.google_secret_manager_secret_version_access.db_password.secret_data
+}
+
+# Allow sa-manager-infra to use Cloud SQL Studio (query via console).
+# roles/cloudsql.viewer: view instance metadata and access SQL Studio UI.
+# roles/cloudsql.client: connect to the Cloud SQL instance.
+resource "google_project_iam_member" "manager_infra_cloudsql_viewer" {
+  project = var.project_id
+  role    = "roles/cloudsql.viewer"
+  member  = "serviceAccount:sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "manager_infra_cloudsql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
 }
 
 
@@ -777,9 +804,27 @@ resource "google_sql_database_instance" "private_db_instance" {
       ipv4_enabled    = false
       private_network = google_compute_network.vpc_network.self_link
     }
+    database_flags {
+      name  = "cloudsql_iam_authentication"
+      value = "on"
+    }
   }
   deletion_protection = true
   depends_on          = [google_service_networking_connection.private_vpc_connection, google_project_service.cloudsql]
+}
+
+# Allow sa-manager-infra to authenticate to Cloud SQL via IAM (SQL Studio IAM auth).
+resource "google_sql_user" "manager_infra_iam" {
+  name     = "sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
+  instance = google_sql_database_instance.private_db_instance.name
+  type     = "CLOUD_IAM_SERVICE_ACCOUNT"
+}
+
+# cloudsql.instanceUser grants cloudsql.instances.login, required for IAM auth login.
+resource "google_project_iam_member" "manager_infra_cloudsql_instance_user" {
+  project = var.project_id
+  role    = "roles/cloudsql.instanceUser"
+  member  = "serviceAccount:sa-manager-infra@${var.project_id}.iam.gserviceaccount.com"
 }
 
 # Configure the service to host the streamlit application.
@@ -1276,7 +1321,6 @@ resource "google_workflows_workflow" "etl_workflow" {
           assign:
             - raw_table: $${sys.get_env("RAW_BLS_TABLE")}
             - source_format: "CSV"
-            - skip_leading_rows: 1
             - transform_sql: $${"CALL `" + project_id + "." + dataset_id + ".sp_transform_bls`();"}
           next: start_load_job
 
@@ -1284,7 +1328,6 @@ resource "google_workflows_workflow" "etl_workflow" {
           assign:
             - raw_table: $${sys.get_env("RAW_USAJOBS_TABLE")}
             - source_format: "NEWLINE_DELIMITED_JSON"
-            - skip_leading_rows: 0
             - transform_sql: $${"CALL `" + project_id + "." + dataset_id + ".sp_transform_usajobs`();"}
           next: start_load_job
 
@@ -1292,11 +1335,16 @@ resource "google_workflows_workflow" "etl_workflow" {
           assign:
             - raw_table: $${sys.get_env("RAW_ADZUNA_TABLE")}
             - source_format: "NEWLINE_DELIMITED_JSON"
-            - skip_leading_rows: 0
             - transform_sql: $${"CALL `" + project_id + "." + dataset_id + ".sp_transform_adzuna`();"}
           next: start_load_job
 
       - start_load_job:
+          switch:
+            - condition: $${source_format == "CSV"}
+              next: start_load_job_csv
+          next: start_load_job_json
+
+      - start_load_job_csv:
           call: googleapis.bigquery.v2.jobs.insert
           args:
             projectId: $${project_id}
@@ -1312,7 +1360,28 @@ resource "google_workflows_workflow" "etl_workflow" {
                     datasetId: $${dataset_id}
                     tableId: $${raw_table}
                   sourceFormat: $${source_format}
-                  skipLeadingRows: $${skip_leading_rows}
+                  skipLeadingRows: 1
+                  nullMarker: "-"
+                  writeDisposition: "WRITE_APPEND"
+          result: load_job
+          next: poll_load_job
+
+      - start_load_job_json:
+          call: googleapis.bigquery.v2.jobs.insert
+          args:
+            projectId: $${project_id}
+            body:
+              jobReference:
+                location: $${bq_location}
+              configuration:
+                load:
+                  sourceUris:
+                    - $${source_uri}
+                  destinationTable:
+                    projectId: $${project_id}
+                    datasetId: $${dataset_id}
+                    tableId: $${raw_table}
+                  sourceFormat: $${source_format}
                   writeDisposition: "WRITE_APPEND"
           result: load_job
 
@@ -1689,14 +1758,16 @@ resource "google_bigquery_routine" "sp_transform_usajobs" {
       WHEN NOT MATCHED THEN INSERT (source_id, source_name) VALUES (S.source_id, S.source_name);
 
       -- 2. Populate dim_employer from USAJobs raw_payload
+      -- raw_payload is stored as a JSON string value; PARSE_JSON(JSON_VALUE(...,'$')) unwraps it.
       MERGE `${var.project_id}.${var.bq_dataset_id}.dim_employer` T
       USING (
         SELECT DISTINCT
-          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.OrganizationName'))) AS employer_id,
-          JSON_VALUE(raw_payload, '$.OrganizationName') AS employer_name,
+          TO_HEX(MD5(JSON_VALUE(p, '$.OrganizationName'))) AS employer_id,
+          JSON_VALUE(p, '$.OrganizationName') AS employer_name,
           'federal' AS employer_type
-        FROM `${var.project_id}.${var.bq_dataset_id}.raw_usajobs_posting`
-        WHERE JSON_VALUE(raw_payload, '$.OrganizationName') IS NOT NULL
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_usajobs_posting`,
+          UNNEST([PARSE_JSON(JSON_VALUE(raw_payload, '$'), wide_number_mode => 'round')]) AS p
+        WHERE JSON_VALUE(p, '$.OrganizationName') IS NOT NULL
       ) S ON T.employer_id = S.employer_id
       WHEN NOT MATCHED THEN INSERT (employer_id, employer_name, employer_type)
         VALUES (S.employer_id, S.employer_name, S.employer_type);
@@ -1705,12 +1776,13 @@ resource "google_bigquery_routine" "sp_transform_usajobs" {
       MERGE `${var.project_id}.${var.bq_dataset_id}.dim_location` T
       USING (
         SELECT DISTINCT
-          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.PositionLocation[0].LocationName'))) AS location_id,
-          JSON_VALUE(raw_payload, '$.PositionLocation[0].CountryCode') AS country_code,
-          JSON_VALUE(raw_payload, '$.PositionLocation[0].CountrySubDivisionCode') AS state_code,
-          JSON_VALUE(raw_payload, '$.PositionLocation[0].LocationName') AS city_name
-        FROM `${var.project_id}.${var.bq_dataset_id}.raw_usajobs_posting`
-        WHERE JSON_VALUE(raw_payload, '$.PositionLocation[0].LocationName') IS NOT NULL
+          TO_HEX(MD5(JSON_VALUE(p, '$.PositionLocation[0].LocationName'))) AS location_id,
+          JSON_VALUE(p, '$.PositionLocation[0].CountryCode') AS country_code,
+          JSON_VALUE(p, '$.PositionLocation[0].CountrySubDivisionCode') AS state_code,
+          JSON_VALUE(p, '$.PositionLocation[0].LocationName') AS city_name
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_usajobs_posting`,
+          UNNEST([PARSE_JSON(JSON_VALUE(raw_payload, '$'), wide_number_mode => 'round')]) AS p
+        WHERE JSON_VALUE(p, '$.PositionLocation[0].LocationName') IS NOT NULL
       ) S ON T.location_id = S.location_id
       WHEN NOT MATCHED THEN INSERT (location_id, country_code, state_code, city_name)
         VALUES (S.location_id, S.country_code, S.state_code, S.city_name);
@@ -1722,23 +1794,32 @@ resource "google_bigquery_routine" "sp_transform_usajobs" {
           GENERATE_UUID() AS job_posting_id,
           source_id,
           source_posting_key,
-          JSON_VALUE(raw_payload, '$.PositionURI') AS posting_url,
-          JSON_VALUE(raw_payload, '$.PositionTitle') AS job_title,
-          JSON_VALUE(raw_payload, '$.QualificationSummary') AS job_description,
-          JSON_VALUE(raw_payload, '$.PositionSchedule[0].Name') AS work_schedule,
-          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.OrganizationName'))) AS employer_id,
-          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.PositionLocation[0].LocationName'))) AS location_id,
-          SAFE_CAST(JSON_VALUE(raw_payload, '$.PositionRemuneration[0].MinimumRange') AS NUMERIC) AS salary_min,
-          SAFE_CAST(JSON_VALUE(raw_payload, '$.PositionRemuneration[0].MaximumRange') AS NUMERIC) AS salary_max,
-          JSON_VALUE(raw_payload, '$.PositionRemuneration[0].CurrencyCode') AS salary_currency,
-          JSON_VALUE(raw_payload, '$.PositionRemuneration[0].RateIntervalCode') AS salary_interval,
+          JSON_VALUE(p, '$.PositionURI') AS posting_url,
+          JSON_VALUE(p, '$.PositionTitle') AS job_title,
+          JSON_VALUE(p, '$.QualificationSummary') AS job_description,
+          CASE JSON_VALUE(p, '$.PositionSchedule[0].Code')
+            WHEN '1' THEN 'Full-Time'
+            WHEN '2' THEN 'Part-Time'
+            WHEN '3' THEN 'Shift Work'
+            WHEN '4' THEN 'Intermittent'
+            WHEN '5' THEN 'Job Sharing'
+            WHEN '6' THEN 'Multiple Schedules'
+            ELSE JSON_VALUE(p, '$.PositionSchedule[0].Code')
+          END AS work_schedule,
+          TO_HEX(MD5(JSON_VALUE(p, '$.OrganizationName'))) AS employer_id,
+          TO_HEX(MD5(JSON_VALUE(p, '$.PositionLocation[0].LocationName'))) AS location_id,
+          SAFE_CAST(JSON_VALUE(p, '$.PositionRemuneration[0].MinimumRange') AS NUMERIC) AS salary_min,
+          SAFE_CAST(JSON_VALUE(p, '$.PositionRemuneration[0].MaximumRange') AS NUMERIC) AS salary_max,
+          JSON_VALUE(p, '$.PositionRemuneration[0].CurrencyCode') AS salary_currency,
+          JSON_VALUE(p, '$.PositionRemuneration[0].RateIntervalCode') AS salary_interval,
           CASE
-            WHEN JSON_VALUE(raw_payload, '$.UserArea.Details.SecurityClearance') IS NOT NULL
-             AND JSON_VALUE(raw_payload, '$.UserArea.Details.SecurityClearance') NOT IN ('None', '0', 'Not Required')
+            WHEN JSON_VALUE(p, '$.UserArea.Details.SecurityClearance') IS NOT NULL
+             AND JSON_VALUE(p, '$.UserArea.Details.SecurityClearance') NOT IN ('None', '0', 'Not Required')
             THEN TRUE ELSE FALSE
           END AS security_clearance_required,
-          DATE(TIMESTAMP(JSON_VALUE(raw_payload, '$.PublicationStartDate'))) AS posted_date
-        FROM `${var.project_id}.${var.bq_dataset_id}.raw_usajobs_posting`
+          DATE(TIMESTAMP(JSON_VALUE(p, '$.PublicationStartDate'))) AS posted_date
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_usajobs_posting`,
+          UNNEST([PARSE_JSON(JSON_VALUE(raw_payload, '$'), wide_number_mode => 'round')]) AS p
         WHERE source_posting_key IS NOT NULL
       ) S ON T.source_id = S.source_id AND T.source_posting_key = S.source_posting_key
       WHEN NOT MATCHED THEN
@@ -1768,13 +1849,15 @@ resource "google_bigquery_routine" "sp_transform_adzuna" {
       WHEN NOT MATCHED THEN INSERT (source_id, source_name) VALUES (S.source_id, S.source_name);
 
       -- 2. Populate dim_employer from Adzuna raw_payload
+      -- raw_payload is stored as a JSON string value; PARSE_JSON(JSON_VALUE(...,'$')) unwraps it.
       MERGE `${var.project_id}.${var.bq_dataset_id}.dim_employer` T
       USING (
         SELECT DISTINCT
-          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.company.display_name'))) AS employer_id,
-          JSON_VALUE(raw_payload, '$.company.display_name') AS employer_name
-        FROM `${var.project_id}.${var.bq_dataset_id}.raw_adzuna_posting`
-        WHERE JSON_VALUE(raw_payload, '$.company.display_name') IS NOT NULL
+          TO_HEX(MD5(JSON_VALUE(p, '$.company.display_name'))) AS employer_id,
+          JSON_VALUE(p, '$.company.display_name') AS employer_name
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_adzuna_posting`,
+          UNNEST([PARSE_JSON(JSON_VALUE(raw_payload, '$'), wide_number_mode => 'round')]) AS p
+        WHERE JSON_VALUE(p, '$.company.display_name') IS NOT NULL
       ) S ON T.employer_id = S.employer_id
       WHEN NOT MATCHED THEN INSERT (employer_id, employer_name)
         VALUES (S.employer_id, S.employer_name);
@@ -1783,12 +1866,13 @@ resource "google_bigquery_routine" "sp_transform_adzuna" {
       MERGE `${var.project_id}.${var.bq_dataset_id}.dim_location` T
       USING (
         SELECT DISTINCT
-          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.location.display_name'))) AS location_id,
+          TO_HEX(MD5(JSON_VALUE(p, '$.location.display_name'))) AS location_id,
           'US' AS country_code,
           CAST(NULL AS STRING) AS state_code,
-          JSON_VALUE(raw_payload, '$.location.display_name') AS city_name
-        FROM `${var.project_id}.${var.bq_dataset_id}.raw_adzuna_posting`
-        WHERE JSON_VALUE(raw_payload, '$.location.display_name') IS NOT NULL
+          JSON_VALUE(p, '$.location.display_name') AS city_name
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_adzuna_posting`,
+          UNNEST([PARSE_JSON(JSON_VALUE(raw_payload, '$'), wide_number_mode => 'round')]) AS p
+        WHERE JSON_VALUE(p, '$.location.display_name') IS NOT NULL
       ) S ON T.location_id = S.location_id
       WHEN NOT MATCHED THEN INSERT (location_id, country_code, state_code, city_name)
         VALUES (S.location_id, S.country_code, S.state_code, S.city_name);
@@ -1800,19 +1884,20 @@ resource "google_bigquery_routine" "sp_transform_adzuna" {
           GENERATE_UUID() AS job_posting_id,
           source_id,
           source_posting_key,
-          JSON_VALUE(raw_payload, '$.redirect_url') AS posting_url,
-          JSON_VALUE(raw_payload, '$.title') AS job_title,
-          JSON_VALUE(raw_payload, '$.description') AS job_description,
-          JSON_VALUE(raw_payload, '$.contract_time') AS work_schedule,
-          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.company.display_name'))) AS employer_id,
-          TO_HEX(MD5(JSON_VALUE(raw_payload, '$.location.display_name'))) AS location_id,
-          SAFE_CAST(JSON_VALUE(raw_payload, '$.salary_min') AS NUMERIC) AS salary_min,
-          SAFE_CAST(JSON_VALUE(raw_payload, '$.salary_max') AS NUMERIC) AS salary_max,
+          JSON_VALUE(p, '$.redirect_url') AS posting_url,
+          JSON_VALUE(p, '$.title') AS job_title,
+          JSON_VALUE(p, '$.description') AS job_description,
+          JSON_VALUE(p, '$.contract_time') AS work_schedule,
+          TO_HEX(MD5(JSON_VALUE(p, '$.company.display_name'))) AS employer_id,
+          TO_HEX(MD5(JSON_VALUE(p, '$.location.display_name'))) AS location_id,
+          SAFE_CAST(JSON_VALUE(p, '$.salary_min') AS NUMERIC) AS salary_min,
+          SAFE_CAST(JSON_VALUE(p, '$.salary_max') AS NUMERIC) AS salary_max,
           'USD' AS salary_currency,
           'year' AS salary_interval,
           FALSE AS security_clearance_required,
-          DATE(TIMESTAMP(JSON_VALUE(raw_payload, '$.created'))) AS posted_date
-        FROM `${var.project_id}.${var.bq_dataset_id}.raw_adzuna_posting`
+          DATE(TIMESTAMP(JSON_VALUE(p, '$.created'))) AS posted_date
+        FROM `${var.project_id}.${var.bq_dataset_id}.raw_adzuna_posting`,
+          UNNEST([PARSE_JSON(JSON_VALUE(raw_payload, '$'), wide_number_mode => 'round')]) AS p
         WHERE source_posting_key IS NOT NULL
       ) S ON T.source_id = S.source_id AND T.source_posting_key = S.source_posting_key
       WHEN NOT MATCHED THEN
